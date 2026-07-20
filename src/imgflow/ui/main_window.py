@@ -11,18 +11,23 @@ from __future__ import annotations
 from typing import Any
 
 from PySide6.QtWidgets import (
+    QFileDialog,
     QHBoxLayout,
     QInputDialog,
     QLabel,
     QMainWindow,
+    QMessageBox,
     QPushButton,
     QVBoxLayout,
     QWidget,
 )
 
+from imgflow.core.batch import run_batch
 from imgflow.core.engine import ExecutionEngine
+from imgflow.core.errors import ImgflowError
 from imgflow.core.graph import Graph, Node
 from imgflow.core.params import defaults_for
+from imgflow.io_utils.recipe import load_recipe, save_recipe
 from imgflow.operators import registry as default_registry
 from imgflow.ui.node_graph.scene import NodeGraphScene
 from imgflow.ui.node_graph.view import NodeGraphView
@@ -55,6 +60,14 @@ class MainWindow(QMainWindow):
         self.param_form.params_changed.connect(self._on_params_changed)
 
         self._build_layout()
+        self._build_menu()
+
+    def _build_menu(self) -> None:
+        file_menu = self.menuBar().addMenu("Dosya")
+        file_menu.addAction("Reçeteyi Kaydet...", self._on_save_recipe)
+        file_menu.addAction("Reçete Yükle...", self._on_load_recipe)
+        file_menu.addSeparator()
+        file_menu.addAction("Toplu İşlem...", self._on_run_batch)
 
     def _build_layout(self) -> None:
         add_button = QPushButton("Operatör Ekle...")
@@ -111,6 +124,20 @@ class MainWindow(QMainWindow):
         ids = self.node_graph_view.selected_node_ids()
         return ids[0] if ids else None
 
+    def save_recipe_to(self, path: str) -> None:
+        save_recipe(path, self.graph)
+
+    def load_recipe_from(self, path: str) -> None:
+        new_graph = load_recipe(path)
+        for node in new_graph.nodes.values():
+            self.registry.get(node.op_id)  # bilinmeyen operatör varsa erken hata ver
+        self._selected_node_id = None
+        self.param_form.set_params([], {})
+        self.scene.load_graph(new_graph)
+
+    def run_batch_process(self, node_id: str, input_folder: str, output_csv: str) -> list[dict[str, Any]]:
+        return run_batch(self.graph, node_id, input_folder, output_csv, registry=self.registry)
+
     # -- Qt slot'ları -----------------------------------------------------
 
     def _on_add_operator(self) -> None:
@@ -125,6 +152,45 @@ class MainWindow(QMainWindow):
         node_id = self.selected_node_id()
         if node_id:
             self.remove_operator(node_id)
+
+    def _on_save_recipe(self) -> None:
+        path, _filter = QFileDialog.getSaveFileName(self, "Reçeteyi Kaydet", "", "JSON (*.json)")
+        if not path:
+            return
+        try:
+            self.save_recipe_to(path)
+        except OSError as exc:
+            QMessageBox.critical(self, "Reçete Kaydedilemedi", str(exc))
+
+    def _on_load_recipe(self) -> None:
+        path, _filter = QFileDialog.getOpenFileName(self, "Reçete Yükle", "", "JSON (*.json)")
+        if not path:
+            return
+        try:
+            self.load_recipe_from(path)
+        except (ImgflowError, OSError, ValueError) as exc:
+            QMessageBox.critical(self, "Reçete Yüklenemedi", str(exc))
+
+    def _on_run_batch(self) -> None:
+        node_id = self.selected_node_id()
+        if node_id is None:
+            QMessageBox.information(self, "Toplu İşlem", "Önce ölçümlerin alınacağı node'u seçin.")
+            return
+        input_dir = QFileDialog.getExistingDirectory(self, "Görüntü Klasörü Seç")
+        if not input_dir:
+            return
+        output_csv, _filter = QFileDialog.getSaveFileName(self, "CSV Dosyası", "", "CSV (*.csv)")
+        if not output_csv:
+            return
+        try:
+            rows = self.run_batch_process(node_id, input_dir, output_csv)
+        except (ValueError, OSError) as exc:
+            QMessageBox.critical(self, "Toplu İşlem Hatası", str(exc))
+            return
+        error_count = sum(1 for row in rows if "error" in row)
+        QMessageBox.information(
+            self, "Toplu İşlem Tamamlandı", f"{len(rows)} satır yazıldı ({error_count} hata)."
+        )
 
     def _on_graph_changed(self) -> None:
         self.engine.mark_all_dirty()

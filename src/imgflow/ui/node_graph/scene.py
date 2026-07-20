@@ -62,6 +62,29 @@ class NodeGraphScene(QGraphicsScene):
         self.graph_changed.emit()
         return item
 
+    def load_graph(self, new_graph: Graph) -> None:
+        """Sahnenin tamamını new_graph'ın içeriğiyle değiştirir.
+
+        Altındaki Graph nesnesinin kimliği korunur (nodes/edges yerinde değiştirilir),
+        böylece bu sahneyle aynı Graph'ı paylaşan ExecutionEngine referansı geçersiz olmaz.
+        """
+        for item in list(self.node_items.values()):
+            self.removeItem(item)
+        for edge_item in list(self.edge_items):
+            self.removeItem(edge_item)
+        self.node_items.clear()
+        self.edge_items.clear()
+
+        self.graph.nodes = dict(new_graph.nodes)
+        self.graph.edges = list(new_graph.edges)
+
+        for node in self.graph.nodes.values():
+            self._create_node_item(node)
+        for edge in self.graph.edges:
+            self._create_edge_item(edge)
+
+        self.graph_changed.emit()
+
     def remove_node(self, node_id: str) -> None:
         item = self.node_items.pop(node_id, None)
         if item is None:

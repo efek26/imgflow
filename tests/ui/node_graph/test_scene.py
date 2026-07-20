@@ -1,6 +1,6 @@
 from PySide6.QtCore import QPointF
 
-from imgflow.core.graph import Graph, Node
+from imgflow.core.graph import Edge, Graph, Node
 from imgflow.operators import registry
 from imgflow.ui.node_graph.scene import NodeGraphScene
 
@@ -147,6 +147,25 @@ def test_begin_update_end_connection_creates_edge_when_released_over_compatible_
 
     assert len(scene.graph.edges) == 1
     assert scene._temp_line is None
+
+
+def test_load_graph_replaces_content_and_preserves_graph_identity(qtbot):
+    scene = _scene()
+    scene.add_node(Node("old", "io.image_source"))
+    original_graph = scene.graph
+
+    new_graph = Graph()
+    new_graph.add_node(Node("src", "io.image_source", position=(5.0, 5.0)))
+    new_graph.add_node(Node("gray", "color.convert"))
+    new_graph.add_edge(Edge(("src", "image"), ("gray", "image")))
+
+    scene.load_graph(new_graph)
+
+    assert scene.graph is original_graph
+    assert set(scene.graph.nodes) == {"src", "gray"}
+    assert set(scene.node_items) == {"src", "gray"}
+    assert len(scene.edge_items) == 1
+    assert "old" not in scene.graph.nodes
 
 
 def test_end_connection_without_target_creates_no_edge(qtbot):
