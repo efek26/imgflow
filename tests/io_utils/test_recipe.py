@@ -54,3 +54,33 @@ def test_missing_schema_version_raises():
     del data["schema_version"]
     with pytest.raises(RecipeVersionError):
         graph_from_dict(data)
+
+
+def test_calibration_profile_round_trips():
+    g = _sample_graph()
+    g.calibration_profile = "hat1"
+    g.calibration_height_mm = 73.5
+
+    data = graph_to_dict(g)
+    restored = graph_from_dict(data)
+
+    assert data["calibration_profile"] == "hat1"
+    assert data["calibration_height_mm"] == 73.5
+    assert restored.calibration_profile == "hat1"
+    assert restored.calibration_height_mm == 73.5
+
+
+def test_v1_recipe_without_calibration_fields_still_loads():
+    """Eski (v1) reçete dosyalarında calibration_profile/calibration_height_mm alanları
+    hiç yok — geriye dönük uyumluluk: bu dosyalar hâlâ yüklenebilmeli, iki alan da None
+    olmalı."""
+    data = graph_to_dict(_sample_graph())
+    data["schema_version"] = 1
+    del data["calibration_profile"]
+    del data["calibration_height_mm"]
+
+    restored = graph_from_dict(data)
+
+    assert restored.calibration_profile is None
+    assert restored.calibration_height_mm is None
+    assert set(restored.nodes) == {"src", "gray"}

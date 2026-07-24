@@ -138,3 +138,51 @@ def test_unresolved_operator_id_becomes_error():
 
     result = engine.evaluate("na")
     assert not result.ok
+
+
+def test_trial_run_uses_override_params_without_touching_cache():
+    engine, (op_a, op_b, op_c) = linear_setup()
+    engine.evaluate("nc")
+
+    result = engine.trial_run("nb", {"add": 999})
+
+    assert result.ok
+    assert result.outputs["out"] == 1000  # na çıktısı (1) + 999
+    # cache/dirty durumu bozulmadı: yeniden evaluate aynı (orijinal) sonucu vermeli, nb tekrar çalışmamalı
+    before = op_b.call_count
+    result2 = engine.evaluate("nc")
+    assert result2.outputs["out"] == 111
+    assert op_b.call_count == before
+
+
+def test_trial_run_without_cached_ancestors_becomes_error():
+    engine, (op_a, op_b, op_c) = linear_setup()
+    result = engine.trial_run("nb", {"add": 5})
+    assert not result.ok
+
+
+def test_inject_result_sets_cache_and_dirties_downstream_only():
+    engine, (op_a, op_b, op_c) = linear_setup()
+    engine.evaluate("nc")
+
+    engine.inject_result("na", {"out": 500})
+    result = engine.evaluate("nc")
+
+    assert result.ok
+    assert result.outputs["out"] == 500 + 10 + 100  # nb ve nc yeni na değeriyle yeniden hesaplandı
+    assert op_a.call_count == 1  # na'nın kendisi yeniden ÇALIŞTIRILMADI, sadece cache'i enjekte edildi
+    assert op_b.call_count == 2
+    assert op_c.call_count == 2
+
+
+def test_inject_result_on_leaf_node_does_not_dirty_ancestors():
+    engine, (op_a, op_b, op_c) = linear_setup()
+    engine.evaluate("nc")
+
+    engine.inject_result("nc", {"out": 999})
+    result = engine.evaluate("nc")
+
+    assert result.outputs["out"] == 999
+    assert op_a.call_count == 1
+    assert op_b.call_count == 1
+    assert op_c.call_count == 1  # leaf enjekte edildiği için yeniden çalışmadı, doğrudan cache'ten döndü

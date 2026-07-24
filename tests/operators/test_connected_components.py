@@ -37,3 +37,64 @@ def test_connectivity_4_vs_8_diagonal_touch():
 
     assert out4["count"] == 2
     assert out8["count"] == 1
+
+
+def test_non_binary_input_is_auto_thresholded_instead_of_one_giant_blob():
+    # Eşiklemesiz Siyah-Beyaz/RGB/HSV çıktısı gibi ikili OLMAYAN bir girdi verildiğinde,
+    # eskiden neredeyse tüm görüntü sıfırdan farklı olduğu için tek dev "bölge" sayılırdı.
+    img = np.zeros((20, 20), dtype=np.uint8)
+    img[2:6, 2:6] = 80  # gürültü seviyesinde soluk bir bölge
+    img[12:18, 12:18] = 220  # belirgin parlak bir nesne
+
+    out = ConnectedComponentsOp().run({"image": img}, {"connectivity": "8"})
+
+    # otomatik Otsu eşiklemesi devreye girip anlamlı sayıda (görüntü boyutunda TEK dev blok değil) bölge vermeli
+    assert 1 <= out["count"] <= 2
+    assert out["labels"][14, 14] != 0  # parlak bölge etiketlenmiş
+
+
+def test_two_unique_non_zero_255_values_are_still_auto_thresholded():
+    # Regresyon: HSV round-trip gibi durumlarda görüntü TAM OLARAK 2 farklı değer içerebilir
+    # ama bunlar {0,255} değildir (ör. koyu arka plan=40, nesne=117) -- "iki değer var, zaten
+    # ikili" diye yanlışça kabul edilip Otsu atlanırsa, connectedComponents sıfırdan farklı
+    # HER iki değeri deön plan sayıp tüm görüntüyü tek dev bölge yapar.
+    img = np.full((20, 20), 40, dtype=np.uint8)  # koyu arka plan (sıfır DEĞİL)
+    img[5:15, 5:15] = 117  # belirgin nesne
+
+    out = ConnectedComponentsOp().run({"image": img}, {"connectivity": "8"})
+
+    assert out["count"] == 1
+    assert out["labels"][10, 10] != 0  # nesne etiketlenmiş
+    assert out["labels"][1, 1] == 0  # arka plan artık ön plan SAYILMIYOR (dev blok değil)
+
+
+def test_already_binary_input_behavior_is_unchanged():
+    img = np.zeros((10, 10), dtype=np.uint8)
+    img[1:3, 1:3] = 255
+    img[6:9, 6:9] = 255
+
+    out = ConnectedComponentsOp().run({"image": img}, {"connectivity": "8"})
+
+    assert out["count"] == 2
+
+
+def test_max_area_ratio_excludes_floor_sized_blob_but_keeps_small_object():
+    img = np.zeros((20, 20), dtype=np.uint8)
+    img[0:20, 0:15] = 255  # yanlışlıkla eşiklenmiş bant/zemin -- görüntünün büyük kısmı
+    img[16:19, 16:19] = 255  # gerçek küçük nesne, zeminden ayrık
+
+    out = ConnectedComponentsOp().run({"image": img}, {"connectivity": "8", "max_area_ratio": 0.5})
+
+    assert out["count"] == 1
+    assert out["labels"][10, 5] == 0  # zemin bloğu elendi
+    assert out["labels"][17, 17] != 0  # küçük nesne hala etiketli
+
+
+def test_max_area_ratio_zero_disables_filtering_by_default():
+    img = np.zeros((20, 20), dtype=np.uint8)
+    img[0:20, 0:15] = 255
+    img[16:19, 16:19] = 255
+
+    out = ConnectedComponentsOp().run({"image": img}, {"connectivity": "8"})
+
+    assert out["count"] == 2

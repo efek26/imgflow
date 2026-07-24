@@ -5,13 +5,13 @@ import pytest
 from imgflow.core.engine import ExecutionEngine
 from imgflow.core.graph import Edge, Graph, Node
 from imgflow.operators import registry
-from imgflow.operators.builtin.color_convert import ColorConvertOp
+from imgflow.operators.builtin.color_modes import GrayscaleOp
 from imgflow.operators.builtin.image_source import ImageSourceOp
 from imgflow.operators.builtin.threshold import ThresholdOp
 
 
 def test_builtins_registered_by_default():
-    for op_id in ("io.image_source", "color.convert", "segment.threshold"):
+    for op_id in ("io.image_source", "color.grayscale", "segment.threshold"):
         assert registry.get(op_id) is not None
 
 
@@ -35,9 +35,9 @@ def test_image_source_nonexistent_file_raises(tmp_path):
         ImageSourceOp().run({}, {"path": str(tmp_path / "yok.png")})
 
 
-def test_color_convert_bgr_to_gray():
+def test_grayscale_converts_bgr_to_gray():
     img = np.zeros((4, 4, 3), dtype=np.uint8)
-    out = ColorConvertOp().run({"image": img}, {"mode": "BGR2GRAY"})
+    out = GrayscaleOp().run({"image": img}, {})
     assert out["image"].shape == (4, 4)
 
 
@@ -54,7 +54,7 @@ def test_pipeline_end_to_end_with_real_registry(tmp_path):
 
     g = Graph()
     g.add_node(Node("src", "io.image_source", params={"path": str(path)}))
-    g.add_node(Node("gray", "color.convert", params={"mode": "BGR2GRAY"}))
+    g.add_node(Node("gray", "color.grayscale", params={}))
     g.add_node(
         Node(
             "th",

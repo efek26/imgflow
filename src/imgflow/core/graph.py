@@ -29,6 +29,15 @@ class Graph:
     def __init__(self) -> None:
         self.nodes: dict[str, Node] = {}
         self.edges: list[Edge] = []
+        self.calibration_profile: str | None = None
+        """`io_utils/calibration_store.py`'de saklı bir kalibrasyon profilinin adı (varsa) —
+        reçete yüklendiğinde ilişkili lens/yükseklik-ölçek kalibrasyonunun otomatik
+        uygulanabilmesi için (bkz. `main_window.load_recipe_from`)."""
+        self.calibration_height_mm: float | None = None
+        """`calibration_profile`'daki yükseklik-ölçek modelinin HANGİ yükseklik için
+        değerlendirileceği (mm) — bir yükseklik-ölçek modeli tek bir eğridir, tek bir
+        yükseklik değildir; reçetenin otomatik mekanizmanın tam olarak uygulanabilmesi
+        (manuel yükseklik girişine gerek kalmadan) için bu değeri de taşıması gerekir."""
 
     # -- mutation -----------------------------------------------------
 

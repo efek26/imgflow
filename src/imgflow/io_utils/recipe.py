@@ -9,7 +9,7 @@ from typing import Any
 from imgflow.core.errors import RecipeVersionError
 from imgflow.core.graph import Edge, Graph, Node
 
-RECIPE_SCHEMA_VERSION = 1
+RECIPE_SCHEMA_VERSION = 2
 
 
 def graph_to_dict(graph: Graph) -> dict[str, Any]:
@@ -25,6 +25,8 @@ def graph_to_dict(graph: Graph) -> dict[str, Any]:
             for node in graph.nodes.values()
         ],
         "edges": [{"src": list(edge.src), "dst": list(edge.dst)} for edge in graph.edges],
+        "calibration_profile": graph.calibration_profile,
+        "calibration_height_mm": graph.calibration_height_mm,
     }
 
 
@@ -50,6 +52,8 @@ def graph_from_dict(data: dict[str, Any]) -> Graph:
     for raw_edge in data.get("edges", []):
         src, dst = raw_edge["src"], raw_edge["dst"]
         graph.add_edge(Edge(src=(src[0], src[1]), dst=(dst[0], dst[1])))
+    graph.calibration_profile = data.get("calibration_profile")
+    graph.calibration_height_mm = data.get("calibration_height_mm")
     return graph
 
 

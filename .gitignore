@@ -10,3 +10,8 @@ dist/
 *.spec.bak
 .vscode/
 .idea/
+
+# Uygulamanın CWD'ye göreli yazdığı çalışma zamanı verisi (io_utils/calibration_store.py,
+# io_utils/camera_settings_store.py) -- kullanıcıya özel kayıtlı profiller, kaynak kod değil.
+calibration/
+camera_settings/

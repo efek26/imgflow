@@ -9,13 +9,18 @@ registry = Registry()
 
 def _register_builtins() -> None:
     from imgflow.operators.builtin import (  # noqa: F401
-        color_convert,
+        color_modes,
+        color_props,
         connected_components,
         filtering,
+        flat_field,
         image_source,
         morphology,
+        onnx_detect,
         region_props,
         roi,
+        shape_match,
+        texture_props,
         threshold,
     )
 

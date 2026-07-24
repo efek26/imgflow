@@ -11,7 +11,7 @@ from imgflow.operators import registry
 def _make_pipeline() -> Graph:
     g = Graph()
     g.add_node(Node("src", "io.image_source"))
-    g.add_node(Node("gray", "color.convert", params={"mode": "BGR2GRAY"}))
+    g.add_node(Node("gray", "color.grayscale", params={}))
     g.add_node(
         Node("th", "segment.threshold", params={"value": 100, "max_value": 255, "mode": "BINARY"})
     )

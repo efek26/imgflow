@@ -21,6 +21,17 @@ class Registry:
         self._ops[op_id] = op_cls
         return op_cls
 
+    def register_or_replace(self, op_cls: type[Operator]) -> type[Operator]:
+        """`register` gibi ama çakışmada hata vermez, üzerine yazar — özel filtreler gibi
+        çalışma zamanında (kaydet/düzenle akışı) yeniden kaydedilebilen operatörler için."""
+        self._ops[op_cls.id] = op_cls
+        return op_cls
+
+    def unregister(self, op_id: str) -> None:
+        """Sessizce no-op'tur (op_id kayıtlı değilse) — özel filtre silme akışı, dosya zaten
+        yoksa da registry tarafını temizlemeye çalışabilir."""
+        self._ops.pop(op_id, None)
+
     def get(self, op_id: str) -> type[Operator]:
         try:
             return self._ops[op_id]

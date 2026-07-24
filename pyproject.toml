@@ -21,9 +21,16 @@ dev = [
     "black>=24.0",
     "pyinstaller>=6.5",
     "pyinstaller-hooks-contrib>=2024.0",
+    "onnx>=1.15",
+]
+camera = [
+    "pypylon>=3.0",
+]
+ml = [
+    "onnxruntime>=1.17",
 ]
 
-[project.scripts]
+[project.gui-scripts]
 imgflow = "imgflow.cli:main"
 
 [tool.setuptools.packages.find]
