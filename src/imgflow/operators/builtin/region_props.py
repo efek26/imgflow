@@ -54,13 +54,30 @@ def draw_measurements_overlay(
     text_thickness = max(1, round(1.5 * scale_factor))
 
     for index, m in enumerate(measurements, start=1):
+        # GERÇEK ÇÖKME (log: `KeyError: 'obb_cx'`, `main_window._compose_display_image` ->
+        # buraya): bu fonksiyon `bbox_*` VE `obb_*` anahtarlarının HEPSİNİN var olduğunu
+        # varsayıyordu, ama "Normal"/"İkisi Bir Arada"/"ROI Bağlamda" modları ölçümleri
+        # HANGİ operatörden gelirse gelsin buraya veriyor. `analysis.color_props`/
+        # `analysis.texture_props`'un nesne-başına (ya da Elle ROI) çıktısında `bbox_*` VAR
+        # ama `obb_*` YOK; `geom.shape_match`/`ml.onnx_detect`'te `bbox_*` de yok. O adımlar
+        # seçili haldeyken görünüm modunu değiştirmek uygulamayı düşürüyordu. Artık her ölçüm
+        # SADECE gerçekten taşıdığı alanlarla çizilir: `bbox_*` yoksa atlanır, `obb_*` yoksa
+        # eksene paralel bbox dikdörtgeni çizilir.
+        if not all(k in m for k in ("bbox_x", "bbox_y", "bbox_w", "bbox_h")):
+            continue
         x, y, w, h = m["bbox_x"], m["bbox_y"], m["bbox_w"], m["bbox_h"]
         if "tolerance_ok" in m:
             color = _TOL_OK_COLOR if m["tolerance_ok"] else _TOL_FAIL_COLOR
         else:
             color = _OVERLAY_COLOR
-        box = cv2.boxPoints(((m["obb_cx"], m["obb_cy"]), (m["obb_w"], m["obb_h"]), m["obb_angle"]))
-        cv2.drawContours(overlay, [np.intp(box)], 0, color, box_thickness)
+        has_obb = all(k in m for k in ("obb_cx", "obb_cy", "obb_w", "obb_h", "obb_angle"))
+        if has_obb:
+            box = cv2.boxPoints(
+                ((m["obb_cx"], m["obb_cy"]), (m["obb_w"], m["obb_h"]), m["obb_angle"])
+            )
+            cv2.drawContours(overlay, [np.intp(box)], 0, color, box_thickness)
+        else:
+            cv2.rectangle(overlay, (x, y), (x + w, y + h), color, box_thickness)
         cv2.putText(
             overlay,
             f"#{index}",
@@ -71,14 +88,17 @@ def draw_measurements_overlay(
             text_thickness,
             cv2.LINE_AA,
         )
+        # Boyut yazısı da aynı gerekçeyle: `obb_*` varsa (gerçek yönlü boyut) o kullanılır,
+        # yoksa eksene paralel bbox boyutuna düşülür.
+        dim_w, dim_h = (m["obb_w"], m["obb_h"]) if has_obb else (float(w), float(h))
         if mm_per_px > 0:
             cm_per_px = mm_per_px / 10.0
             dim_text = (
-                f"{m['obb_w']:.0f} x {m['obb_h']:.0f} px "
-                f"({m['obb_w'] * cm_per_px:.2f} x {m['obb_h'] * cm_per_px:.2f} cm)"
+                f"{dim_w:.0f} x {dim_h:.0f} px "
+                f"({dim_w * cm_per_px:.2f} x {dim_h * cm_per_px:.2f} cm)"
             )
         else:
-            dim_text = f"{m['obb_w']:.0f} x {m['obb_h']:.0f} px"
+            dim_text = f"{dim_w:.0f} x {dim_h:.0f} px"
         if "tolerance_ok" in m:
             dim_text += "  OK" if m["tolerance_ok"] else "  NG"
         cv2.putText(

@@ -1,3 +1,4 @@
+import cv2
 import numpy as np
 
 from imgflow.operators import registry
@@ -118,7 +119,14 @@ def test_polarity_both_labels_white_and_black_blobs_with_distinct_ids():
     img = np.zeros((10, 10), dtype=np.uint8)
     img[1:3, 1:3] = 255  # beyaz blok, zeminden (siyah) ayrık değil -- zeminle birleşir
 
-    out = ConnectedComponentsOp().run({"image": img}, {"connectivity": "8", "polarity": "both"})
+    # `max_area_ratio` BİLİNÇLİ olarak kapatıldı: bu 10x10 sentetik görüntüde siyah "zemin
+    # bloğu" alanın %96'sını kaplıyor, yani yeni varsayılan (0.9) onu zemin sayıp eliyor.
+    # Gerçek bir "Her İkisi" sahnesinde (ör. gri bant üzerinde hem açık hem koyu ürünler)
+    # iki taraftan hiçbiri %90'a yaklaşmaz, ama bu test tam da tamamlayıcı tarafın
+    # etiketlendiğini doğruladığı için sınırın burada devre dışı olması gerekiyor.
+    out = ConnectedComponentsOp().run(
+        {"image": img}, {"connectivity": "8", "polarity": "both", "max_area_ratio": 0.0}
+    )
 
     # tüm görüntü ya beyaz bloğa ya da siyah zemine ait -- etiketsiz (0) piksel kalmamalı
     assert np.all(out["labels"] != 0)
@@ -140,7 +148,12 @@ def test_polarity_both_on_already_binary_two_blob_image_finds_three_regions():
     assert np.all(out["labels"] != 0)
 
 
-def test_max_area_ratio_zero_disables_filtering_by_default():
+def test_default_area_limits_keep_a_large_but_sub_threshold_region():
+    """Varsayılan alan sınırları artık KAPALI değil (min %0.05 / maks %90) — ama ikisinin
+    ARASINDA kalan bölgeler aynen korunur: buradaki zemin bloğu %75, küçük nesne %2.25.
+    (Bu test eskiden `max_area_ratio_zero_disables_filtering_by_default` adıyla varsayılanın
+    0/kapalı olmasını sabitliyordu; varsayılan bilinçli olarak değişti, ölçtüğü asıl davranış
+    -- sınırlar arasındaki bölgelerin elenmemesi -- korunacak şekilde güncellendi.)"""
     img = np.zeros((20, 20), dtype=np.uint8)
     img[0:20, 0:15] = 255
     img[16:19, 16:19] = 255
@@ -148,3 +161,57 @@ def test_max_area_ratio_zero_disables_filtering_by_default():
     out = ConnectedComponentsOp().run({"image": img}, {"connectivity": "8"})
 
     assert out["count"] == 2
+
+
+def test_min_area_ratio_default_drops_noise_specks_but_keeps_real_objects():
+    """Gerçek kullanıcı raporu: "direkt alan bulmaya çalışınca çok fazla bölge buluyor o
+    yüzden sistemi zora sokuyor." Eşiklemeden kalan tek piksellik lekeler artık VARSAYILAN
+    olarak (min_area_ratio=%0.05) elenir — `analysis.region_props` onları hiç dolaşmaz."""
+    img = np.zeros((200, 200), dtype=np.uint8)
+    img[20:60, 20:60] = 255  # gerçek nesne: 1600 px = alanın %4'ü
+    rng = np.random.default_rng(0)
+    for _ in range(300):  # tek piksellik gürültü lekeleri (%0.0025 -> eşiğin ALTINDA)
+        y, x = rng.integers(120, 195, size=2)
+        img[y, x] = 255
+
+    noisy = ConnectedComponentsOp().run({"image": img}, {"connectivity": "8", "min_area_ratio": 0.0})
+    filtered = ConnectedComponentsOp().run({"image": img}, {"connectivity": "8"})
+
+    # Filtre kapalıyken yüzlerce bölge, varsayılan filtreyle sadece gerçek nesne kalır.
+    assert noisy["count"] > 100
+    assert filtered["count"] == 1
+    assert filtered["labels"][40, 40] != 0  # gerçek nesne KORUNDU
+
+
+def test_max_area_ratio_default_drops_a_floor_sized_region():
+    """Gerçek kullanıcı raporu: "bazen tüm şekli alıyor." Görüntünün neredeyse tamamını
+    kaplayan bileşen artık varsayılan olarak (0.9) zemin sayılıp elenir."""
+    img = np.zeros((100, 100), dtype=np.uint8)
+    img[2:98, 2:98] = 255  # 9216 px = alanın %92'si -> zemin
+
+    out = ConnectedComponentsOp().run({"image": img}, {"connectivity": "8"})
+    disabled = ConnectedComponentsOp().run({"image": img}, {"connectivity": "8", "max_area_ratio": 0.0})
+
+    assert out["count"] == 0
+    assert disabled["count"] == 1
+
+
+def test_polarity_auto_labels_dark_products_instead_of_the_light_floor():
+    """"Tüm şekli alıyor" sorununun ASIL çözümü: açık zemin üzerindeki KOYU ürünlerde
+    'Beyaz' polarite zeminin tamamını tek bir dev 'ürün' olarak etiketliyordu."""
+    img = np.full((200, 200), 230, dtype=np.uint8)  # açık zemin
+    cv2.circle(img, (70, 100), 25, 50, -1)  # koyu ürün 1
+    cv2.circle(img, (140, 100), 25, 50, -1)  # koyu ürün 2
+
+    white = ConnectedComponentsOp().run(
+        {"image": img}, {"connectivity": "8", "polarity": "white", "max_area_ratio": 0.0}
+    )
+    auto = ConnectedComponentsOp().run({"image": img}, {"connectivity": "8", "polarity": "auto"})
+
+    # 'Beyaz': zemin tek dev bölge olarak ölçülür (kullanıcının şikayeti).
+    assert white["count"] == 1
+    assert white["labels"][5, 5] != 0  # zemin etiketli
+    # 'Otomatik': iki gerçek ürün etiketlenir, zemin etiketsiz kalır.
+    assert auto["count"] == 2
+    assert auto["labels"][5, 5] == 0
+    assert auto["labels"][100, 70] != 0 and auto["labels"][100, 140] != 0

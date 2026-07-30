@@ -1857,6 +1857,77 @@ neden bulundu — `core/auto_objects.py::_apply_auto_polarity`'nin polarite öl�
   doğrudan sabitler). İkisi de ölçüt geçici olarak eski hâline döndürülüp GERÇEKTEN
   başarısız oldukları doğrulanarak yazıldı.
 
+**Devam — kullanıcı "kare yakalarken uygulama kendiliğinden kapandı, hataları ara ve onar" +
+"bölge ölçümünde çok fazla bölge buluyor, sistemi zora sokuyor; manuel bir max-min alanla
+başlasın 0'dan değil; bazen de tüm şekli alıyor" dedi.** Üç ayrı gerçek hata bulundu:
+
+- **SESSİZ ÇÖKME (kök neden Windows olay günlüğüyle KANITLANDI):** `~/.imgflow/logs/imgflow.log`
+  yakalama satırından sonra HİÇ traceback içermiyordu — yani Python istisnası DEĞİLDİ. Windows
+  Application olay günlüğü kesin kanıtı verdi: `pythonw.exe` içinde iki ayrı `0xc0000005`
+  (erişim ihlali) çökmesi, hatalı modüller `shiboken6.abi3.dll` ve `pyside6.abi3.dll` — yani
+  C++ nesnesi zaten yok edilmiş bir Qt sarmalayıcısının kullanılması. **Kök neden
+  `main_window.py::_on_live_worker_finished`:** `QThread::finished` thread OS düzeyinde HENÜZ
+  ÇIKMAMIŞKEN yayılır; `self._live_worker = None` worker'a kalan TEK güçlü Python referansını
+  bırakıyordu (`finished`'e bağlı lambda worker'ı yakalıyor olsa da o lambda worker'ın KENDİ
+  bağlantısına ait olduğundan ortaya sadece bir REFERANS DÖNGÜSÜ çıkar). Döngüyü GC rastgele bir
+  anda toplar; o an thread henüz sonlanmamışsa alttaki C++ `QThread` "çalışırken yok edilmiş"
+  halde silinir ve süreç sessizce ölür. **Yakalama sırasında tetiklenmesi tesadüf değil:**
+  'Filtrelenmiş Kareyi Yakala' ana thread'de senkron `engine.evaluate()` + galeri küçük-resim
+  yenilemesi çalıştırır, bu da olay teslimini geciktirip GC zamanlamasını tam bu tehlikeli
+  pencereye kaydırır (kamera tick'leri bu sırada worker kurup yıkmaya devam eder).
+  **Düzeltme:** referansı bırakmadan ÖNCE `worker.wait()` (deterministik join) — GC nesneyi ne
+  zaman toplarsa toplasın thread KESİN olarak çıkmış olur. Slot ana thread'de (kuyruklu
+  bağlantı) çalıştığından kilitlenme riski yok. **AYNI hata sınıfı `_BatchWorker`'da da vardı**
+  (`finished_ok`/`failed` `run()`'ın İÇİNDEN yayılır, yani yayıldıkları anda thread KESİNLİKLE
+  çalışıyordur) — yeni `_join_batch_worker()` ile `_on_batch_finished`/`_on_batch_failed`'in
+  ikisinde de join ediliyor. (Toplu işlem dalında modal `QMessageBox`'ın nested olay döngüsü
+  thread'e çıkma ŞANSI veriyordu — garanti değil.) Not: `closeEvent` zaten `wait()` çağırıyordu,
+  eksik olan yer per-tick yoldu.
+- **`KeyError: 'obb_cx'` (logda vardı, ayrı bir çökme):** `region_props.py::
+  draw_measurements_overlay` `bbox_*` VE `obb_*` anahtarlarının HEPSİNİN var olduğunu
+  varsayıyordu, ama "Normal"/"İkisi Bir Arada"/"ROI Bağlamda" modları ölçümleri HANGİ
+  operatörden gelirse gelsin bu fonksiyona veriyor: `color_props`/`texture_props`'un
+  nesne-başına (ya da Elle ROI) çıktısında `bbox_*` VAR ama `obb_*` YOK, `geom.shape_match`/
+  `ml.onnx_detect`'te `bbox_*` de yok. O adımlar seçiliyken görünüm modu değiştirmek
+  uygulamayı düşürüyordu. Artık her ölçüm SADECE taşıdığı alanlarla çizilir: `bbox_*` yoksa
+  atlanır, `obb_*` yoksa eksene paralel bbox dikdörtgeni çizilir (boyut yazısı da aynı şekilde
+  bbox boyutuna düşer) — yan fayda: `color_props`/`texture_props`'un nesne-başına ölçümleri
+  artık bu modlarda gerçekten GÖRÜNÜYOR.
+- **Bölge ölçümü: çok fazla bölge + "tüm şekli alıyor" (`connected_components.py`):** iki ayrı
+  eksiklik. (1) Operatörde min alan filtresi HİÇ YOKTU ve `region_props.min_area` varsayılanı
+  0'dı — eşiklemeden kalan tek piksellik binlerce leke etiketlenip `region_props` hepsini tek
+  tek dolaşıyordu. Yeni `min_area_ratio` (varsayılan **%0.05**, yani kullanıcının istediği gibi
+  0'dan DEĞİL çalışan bir değerden başlar) gürültüyü `region_props`'a HİÇ ULAŞMADAN keser —
+  asıl performans kazancı burada. `region_props.min_area`'nın (cm²/px², kalibrasyona bağlı)
+  AKSİNE burada ORAN kullanılır: çözünürlük/kalibrasyon değişince elle yeniden ayarlamak
+  gerekmez. (2) `max_area_ratio` varsayılanı 0.0 -> **0.9**: görüntünün %90'ından fazlasını
+  kaplayan bileşen pratikte her zaman zemindir. Min/maks eleme mevcut tek vektörel `np.bincount`
+  geçişinde birleştirildi. **"Tüm şekli alıyor"un ASIL kök nedeni ise polarite:** `polarity`
+  varsayılanı `"white"` olduğundan AÇIK zemin üzerindeki KOYU ürünlerde zeminin tamamı tek dev
+  "ürün" olarak etiketleniyordu (bu turda `auto_objects.py` için düzeltilen sorunun AYNISI).
+  Yeni `"auto"` seçeneği aynı (artık topolojik ve gölgeye dayanıklı) `_apply_auto_polarity`'yi
+  YENİDEN KULLANIR — iki farklı "hangi taraf nesne" sezgiseli oluşmaması için tek yerde tutuldu.
+  **Varsayılan bilinçli olarak `"white"` BIRAKILDI:** bu operatör genelde kullanıcının kendi
+  eklediği bir Eşikleme adımından beslenir, orada seçilmiş polariteyi sessizce ezmek
+  öngörülemez olurdu (ölçüldü: mevcut `test_max_area_ratio_excludes_floor_sized_blob...`
+  senaryosunda "auto" ters çevirirdi). Bunun yerine `operator_library.py` açıklamasına
+  SORUN GİDERME notu eklendi ("tüm zemini tek bölge alıyorsa Ölçülecek Bölge = Otomatik",
+  "çok fazla bölge bulunuyorsa Min. Alan Oranı'nı yükseltin").
+  Etkilenen tek mevcut test `test_polarity_both_...`: 10x10 sentetik görüntüde tamamlayıcı
+  (siyah) taraf alanın %96'sı olduğundan yeni maks sınırına takılıyordu — `max_area_ratio: 0.0`
+  açıkça verilerek düzeltildi (gerçek bir "Her İkisi" sahnesinde iki taraftan hiçbiri %90'a
+  yaklaşmaz; bu etkileşim help metnine de yazıldı). Adı yanıltıcı hale gelen
+  `test_max_area_ratio_zero_disables_filtering_by_default` ise ölçtüğü asıl davranış (iki sınır
+  ARASINDA kalan bölgelerin elenmemesi) korunacak şekilde yeniden adlandırıldı.
+- **Yan bulgu — bayat `__pycache__` yanıltıcı traceback üretiyordu:** test hataları dosya yolunu
+  `C:\Users\Hp\OneDrive\Masaüstü\claude\tests\...` olarak gösteriyordu (projenin OneDrive'daki
+  ESKİ kopyası, bkz. yukarıdaki OneDrive kopması olayı). İçerik aynıydı ama pytest'in yeniden
+  yazdığı bytecode'da eski mutlak yol gömülü kalmıştı — çökme ayıklarken güvenilmez. Proje
+  altındaki tüm `__pycache__` + `.pytest_cache` temizlendi, yollar artık doğru.
+- Ölçüm: tam paket 979 test geçiyor; 3 art arda koşumda da SABİT olarak 1 failed + 1 error
+  (ikisi de belgelenmiş `Slot 'MainWindow::' not found` Qt olay-döngüsü kalıntısı, assert
+  DEĞİL) — oturum başındaki baseline ile birebir aynı, regresyon yok.
+
 Bilinen sonraki adım:
 - Serbest biçimli (poligon) ROI çizimi genel `roi.region` operatöründe (`core/roi.py`)
   HÂLÂ YOK — yukarıdaki `RoiCanvas` "POLYGON" modu SADECE `ShapeMatchingDialog`'un model

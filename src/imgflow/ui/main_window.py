@@ -2546,6 +2546,27 @@ class MainWindow(QMainWindow):
         self.status_label.setText(f"Canlı önizleme hesaplanamadı: {message}")
 
     def _on_live_worker_finished(self, worker: "_LiveTickWorker") -> None:
+        """GERÇEK ÇÖKME KAYNAĞI (Windows olay günlüğüyle doğrulandı: `pythonw.exe` içinde
+        `shiboken6.abi3.dll`/`pyside6.abi3.dll` modülünde `0xc0000005` erişim ihlali, kullanıcı
+        raporu "kare yakalarken uygulama kendiliğinden kapandı" — Python tarafında HİÇ traceback
+        yoktu, çünkü çökme C++ katmanındaydı).
+
+        `worker.wait()` neden ŞART: `QThread::finished` thread'in OS düzeyinde HENÜZ ÇIKMADIĞI
+        bir anda yayılır. `self._live_worker = None`, worker'a kalan TEK güçlü Python
+        referansını bırakır — `finished`'e bağlanan lambda worker'ı yakalıyor olsa da o lambda
+        worker'ın KENDİ sinyal bağlantısına ait olduğundan ortaya sadece bir REFERANS DÖNGÜSÜ
+        çıkar. Döngüyü çöp toplayıcı RASTGELE bir anda toplar; o an thread henüz sonlanmamışsa
+        shiboken alttaki C++ `QThread`'ini "çalışırken yok edilmiş" halde siler ve süreç
+        sessizce ölür. Yakalama sırasında tetiklenmesi tesadüf değil: 'Filtrelenmiş Kareyi
+        Yakala' ana thread'de senkron `engine.evaluate()` + galeri küçük-resim yenilemesi
+        çalıştırır, bu da olay teslimini geciktirip GC zamanlamasını tam bu tehlikeli pencereye
+        kaydırır (kamera tick'leri bu sırada worker kurup yıkmaya devam eder).
+
+        `wait()` bırakmayı DETERMİNİSTİK bir join'in arkasına alır: referans düştükten sonra
+        GC nesneyi ne zaman toplarsa toplasın thread KESİN olarak çıkmış olur. Slot ana
+        thread'de (kuyruklu bağlantı) çalıştığından kilitlenme riski yok; thread çoktan
+        bitmişse `wait()` anında döner."""
+        worker.wait()
         if self._live_worker is worker:
             self._live_worker = None
         self._live_worker_busy = False
@@ -2664,6 +2685,7 @@ class MainWindow(QMainWindow):
         worker.start()
 
     def _on_batch_finished(self, rows: list[dict[str, Any]]) -> None:
+        self._join_batch_worker()
         error_count = sum(1 for row in rows if "error" in row)
         QMessageBox.information(
             self, "Toplu İşlem Tamamlandı", f"{len(rows)} satır yazıldı ({error_count} hata)."
@@ -2672,7 +2694,19 @@ class MainWindow(QMainWindow):
         self._batch_worker = None
         self._batch_progress_dialog = None
 
+    def _join_batch_worker(self) -> None:
+        """`_on_live_worker_finished`'deki AYNI çökme gerekçesi (bkz. oradaki uzun not):
+        `_BatchWorker`'ın `finished_ok`/`failed` sinyalleri `run()`'ın İÇİNDEN yayılır, yani
+        yayıldıkları anda thread KESİNLİKLE hâlâ çalışıyordur. `self._batch_worker = None`
+        son güçlü referansı bırakıp C++ `QThread`'in çalışırken yok edilmesine yol
+        açabiliyordu. (Toplu işlem dalında modal `QMessageBox` nested bir olay döngüsü
+        çalıştırdığı için thread'e çıkma şansı veriyordu — ama bu ŞANS, garanti değil.)"""
+        worker = self._batch_worker
+        if worker is not None:
+            worker.wait()
+
     def _on_batch_failed(self, message: str) -> None:
+        self._join_batch_worker()
         # `_BatchWorker` sadece str yayınlıyor (Qt sinyali sınırı) — `show_error` bir
         # Exception bekliyor, `ValueError`/`OSError` de zaten `_ACTIONABLE_TYPES` içinde
         # olduğu için RuntimeError'a sarmak aynı "girdi/ayar sorunu" çerçevesini korur.

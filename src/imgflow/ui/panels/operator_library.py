@@ -187,8 +187,13 @@ _DESCRIPTION_BY_OP_ID = {
         "Birbirine bağlı piksel gruplarını (nesneleri) etiketler ve sayar. Üründe kaç "
         "parça/kusur olduğunu saymanın temel adımıdır — konveyör bandındaki nesne sayımında "
         "kullanılır. 'Ölçülecek Bölge' parametresiyle varsayılan beyaz/parlak bölgeler yerine "
-        "siyah/koyu bölgeler ya da her ikisi birden etiketlenebilir (gölge/aydınlatmadan "
-        "kaynaklı ters dönmüş bölgeler için)."
+        "siyah/koyu bölgeler, her ikisi birden ya da 'Otomatik' etiketlenebilir "
+        "(gölge/aydınlatmadan kaynaklı ters dönmüş bölgeler için). "
+        "SORUN GİDERME: ölçüm 'tüm zemini tek bir dev bölge olarak alıyorsa' ürünleriniz açık "
+        "bir zemin üzerinde KOYU demektir — 'Ölçülecek Bölge' = Otomatik (ya da Siyah) yapın. "
+        "'Çok fazla bölge bulunuyor / sistem yavaşlıyorsa' 'Min. Alan Oranı'nı yükseltin "
+        "(varsayılan %0.05 gürültüyü keser, aşağı akıştaki Bölge Ölçümü'nün binlerce lekeyi "
+        "dolaşmasını önler)."
     ),
     "analysis.region_props": (
         "Etiketlenmiş her bölge için alan, çevre, merkez, sınırlayıcı kutu ve döndürülmüş "

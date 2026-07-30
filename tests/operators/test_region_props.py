@@ -307,3 +307,29 @@ def test_tolerance_zero_bound_means_unbounded():
         {"min_area": 0, "tolerance_enabled": True, "tol_long_max": 20},
     )
     assert out["measurements"][0]["tolerance_ok"] is True
+
+
+def test_draw_measurements_overlay_tolerates_measurements_without_obb_fields():
+    """GERÇEK ÇÖKME (`~/.imgflow/logs/imgflow.log`: `KeyError: 'obb_cx'`): "Normal"/"İkisi Bir
+    Arada"/"ROI Bağlamda" görünüm modları ölçümleri HANGİ operatörden gelirse gelsin bu
+    fonksiyona veriyor. `analysis.color_props`/`analysis.texture_props`'un nesne-başına (ya da
+    Elle ROI) çıktısında `bbox_*` VAR ama `obb_*` YOK — o adım seçiliyken görünüm modunu
+    değiştirmek uygulamayı düşürüyordu. Artık eksene paralel bbox dikdörtgenine düşülür."""
+    base = np.zeros((60, 80, 3), dtype=np.uint8)
+    without_obb = {"bbox_x": 10, "bbox_y": 12, "bbox_w": 20, "bbox_h": 15, "l_mean": 60.0}
+
+    overlay = draw_measurements_overlay(base, [without_obb], 0.0)
+
+    assert overlay.shape == base.shape
+    assert overlay.any()  # bbox dikdörtgeni gerçekten çizildi
+
+
+def test_draw_measurements_overlay_skips_measurements_without_bbox_fields():
+    """`geom.shape_match`/`ml.onnx_detect` ölçümlerinde `bbox_*` hiç yok — çizilecek bir kutu
+    da yoktur; çökmek yerine sessizce atlanmalı."""
+    base = np.zeros((40, 40, 3), dtype=np.uint8)
+    shape_match_like = {"x": 20.0, "y": 20.0, "score": 0.9, "angle": 0.0}
+
+    overlay = draw_measurements_overlay(base, [shape_match_like], 0.0)
+
+    assert not overlay.any()  # hiçbir şey çizilmedi, ÇÖKME de yok
