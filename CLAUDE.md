@@ -1817,6 +1817,46 @@ görmediği için "kontür bulamıyor" sonucuna varıyordu.
   ("Kontur bulunamadı") arayan 7 test yeni ifadeye göre güncellendi (davranış DEĞİŞMEDİ,
   yalnızca metin).
 
+**Devam — kullanıcı "gölgeli şekillerde kontür çizmekte sorun" bildirdi (bilgisayar çökmesiyle
+yarıda kalan iş; bir önceki turun tamamı commit edilmemiş durumdaydı, önce `4a254f8` olarak
+commit'lendi).** Model Öğret'in "Konturu Otomatik Algıla" yolunda GERÇEK, ölçülebilir bir kök
+neden bulundu — `core/auto_objects.py::_apply_auto_polarity`'nin polarite ölçütü:
+- **Kök neden:** ölçüt, Otsu ikili görüntüsünün DIŞ ÇERÇEVE PİKSELLERİNİN yarısından fazlası
+  ön plansa ters çeviriyordu (`_border_foreground_fraction > 0.5`). Gölge de nesne gibi KOYU
+  olduğundan, ROI çerçevesini kesen bir gölge (masaya düşen gölge şeridi, vinyetleme, eşit
+  olmayan aydınlatma) çerçevenin koyu payını büyütüp bu oranı tam eşiğin ETRAFINA düşürüyordu
+  — gerçek yakalamalarda ölçülen değerler **0.48/0.49**, yani karar kıl payıyla devriliyordu.
+  Devrildiğinde sonuç KATASTROFİK: arka plan "nesne" seçilip nesnenin KENDİSİ eleniyordu
+  (ölçülen IoU **0.01**). Aynı nesnede ROI payı %35-100 arasında DOĞRU, %150+ ya da %15'te
+  YANLIŞ karar çıkması, kullanıcının "bazen çalışıyor bazen çalışmıyor" gözlemini birebir
+  açıklıyor.
+- **Düzeltme — ölçüt PİKSEL OYLAMASI yerine TOPOLOJİK:** yeni `_border_touching_fraction`,
+  dış çerçeveye DEĞEN bağlı bileşenlerin toplam ALANINI ölçer (bir bileşen çerçeveye tek
+  pikselle bile değse alanının TAMAMI sayılır); iki polarite için hesaplanıp çerçeveye değen
+  alanı BÜYÜK olan taraf arka plan sayılır. Gölge, üzerine düştüğü zeminin bileşenine katılan
+  bir parçadır — çerçeve oylamasını devirdiği hâlde bu oranı kayda değer biçimde değiştirmez.
+- **Ölçüm (11 gerçek yakalama x nesne başına 7 ROI payı = 174 durum; gölgeli/gradyanlı
+  sahneler + regresyon kontrolü olarak parlak-nesne/koyu-zemin sahneleri):** eski ölçüt
+  150/174 (%86), yeni ölçüt **171/174 (%98)**. Gölge şeridi olan üç sahnede %28-42 -> %100.
+  Uçtan uca doğrulama: kritik sahnede geniş ROI'de IoU 0.01 -> 0.98.
+- **Kalan 3 başarısızlık dürüstçe belgelendi:** hepsi EN DAR ROI'de (nesne kırpımın yarısından
+  fazlasını kaplıyor ve çerçeveye kendisi değiyor) — o rejimde "hangi taraf arka plan" sorusu
+  zaten iyi tanımlı değil, ve diyalog bu durumda ROI'yi GENİŞ çizmeyi söyleyen notu (bkz. bir
+  önceki "Devam" notu) zaten gösteriyor. Köşe doluluğunu ikinci sinyal olarak eklemek denendi;
+  174 durumda kazanç TEK vaka (%98.3 -> %98.9) olduğu için tek/açıklanabilir ilke lehine
+  EKLENMEDİ.
+- Değişiklik SADECE `polarity="auto"` yolunu etkiler (grep'le doğrulandı: tek çağıran
+  `shape_matching_dialog.py::_build_auto_contour_mask`) — `color_props`/`texture_props`'un
+  canlı kamera yolu varsayılan `"bright"` polaritede, davranış/performans BİREBİR aynı.
+- `tests/core/test_auto_objects.py`'ye 2 test: `test_auto_polarity_survives_a_shadow_crossing_
+  the_roi_border` (gölge şeridi çerçeveyi kesen sentetik sahne — tespit edilen maskelerin
+  BİRLEŞİMİ nesneyi içermeli, açık zemini içermemeli; "en büyük bileşen daire olsun" demek
+  yanıltıcı olurdu çünkü bu sentetik sahnede gölge de eşik altında kalıp ayrı bileşen olarak
+  gelir) ve `test_auto_polarity_border_criterion_is_topological_not_a_pixel_vote` (aynı
+  görüntüde piksel oylamasının YANLIŞ, değen-alan ölçütünün DOĞRU tarafı gösterdiğini
+  doğrudan sabitler). İkisi de ölçüt geçici olarak eski hâline döndürülüp GERÇEKTEN
+  başarısız oldukları doğrulanarak yazıldı.
+
 Bilinen sonraki adım:
 - Serbest biçimli (poligon) ROI çizimi genel `roi.region` operatöründe (`core/roi.py`)
   HÂLÂ YOK — yukarıdaki `RoiCanvas` "POLYGON" modu SADECE `ShapeMatchingDialog`'un model

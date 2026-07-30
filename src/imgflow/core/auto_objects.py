@@ -6,9 +6,11 @@ operatörler olduğundan (bkz. CLAUDE.md "FAZ3" notu) ayrı bir `segment.connect
 + `analysis.region_props` çifti KURMADAN, operatör kendi içinde "önce tespit et, sonra her
 nesne için özellik hesapla" akışını uygulayabilmesi için buraya çıkarıldı.
 
-Aynı polarite varsayımı (parlak taraf = ön plan/nesne) `segment.connected_components` ile
-BİREBİR aynıdır — otomatik polarite seçimi (hangi tarafın nesne olduğunu tahmin etmek)
-YAPILMAZ, zaten var olan tutarlı davranış korunur.
+Varsayılan polarite varsayımı (parlak taraf = ön plan/nesne) `segment.connected_components`
+ile BİREBİR aynıdır ve canlı kamera yolunda (`color_props`/`texture_props`) DEĞİŞMEDEN
+kullanılır. Opsiyonel `polarity="auto"` (SADECE `shape_matching_dialog.py`'nin tek seferlik
+eğitim-zamanı kontur tespiti kullanır) hangi tarafın nesne olduğunu kırpımın topolojisinden
+çıkarır — bkz. `_apply_auto_polarity`.
 
 **Parlak yansıma/aydınlatma gerçek kullanıcı sorunu:** parlak/yansıtıcı nesnelerde (ör.
 balonlarda) ışığın oluşturduğu parlama, tek bir GLOBAL Otsu eşiğinin nesnenin geri kalanından
@@ -54,12 +56,28 @@ def _edge_based_foreground_mask(gray: np.ndarray) -> np.ndarray:
     return filled
 
 
-def _border_foreground_fraction(binary: np.ndarray) -> float:
-    """Görüntünün DIŞ ÇERÇEVESİNDEKİ piksellerin ne kadarının ön plan (255) sayıldığı."""
-    top, bottom = binary[0, :], binary[-1, :]
-    left, right = binary[:, 0], binary[:, -1]
-    border = np.concatenate([top, bottom, left, right])
-    return float((border > 0).mean()) if border.size else 0.0
+def _border_touching_fraction(binary: np.ndarray) -> float:
+    """Dış çerçeveye DEĞEN bağlı bileşenlerin toplam alanının görüntüye oranı.
+
+    Çerçeve PİKSELLERİNİ saymaktan (bkz. `_apply_auto_polarity`'nin eski ölçütü) farkı
+    TOPOLOJİK olmasıdır: bir bileşen çerçeveye tek bir pikselle bile değse ALANININ TAMAMI
+    sayılır. Gölge, üzerine düştüğü zeminden ayrı bir bölge değil, o zeminin (ya da nesnenin)
+    bileşenine katılan bir parçadır — bu yüzden çerçeveye düşen gölge, çerçeve oylamasını
+    devirdiği hâlde bu oranı kayda değer biçimde değiştirmez."""
+    num_labels, labels, stats, _ = cv2.connectedComponentsWithStats(binary, connectivity=8)
+    if num_labels <= 1:
+        return 0.0
+    edge_labels = (
+        set(labels[0, :].tolist())
+        | set(labels[-1, :].tolist())
+        | set(labels[:, 0].tolist())
+        | set(labels[:, -1].tolist())
+    )
+    edge_labels.discard(0)
+    if not edge_labels:
+        return 0.0
+    area = sum(int(stats[label, cv2.CC_STAT_AREA]) for label in edge_labels)
+    return area / float(binary.size)
 
 
 def _apply_auto_polarity(binary: np.ndarray) -> np.ndarray:
@@ -73,11 +91,31 @@ def _apply_auto_polarity(binary: np.ndarray) -> np.ndarray:
     (ters çevir işaretliyse) HER ŞEYİ eleyip eğitimi "yeterli kenar noktası yok" hatasıyla
     düşürüyordu.
 
-    Ölçüt tamamen genel ve sahneden bağımsız: **arka plan, kırpımın dış çerçevesini
-    kaplar; çerçeve içine alınmış bir nesne kaplamaz.** Çerçevenin yarısından fazlası ön plan
-    işaretliyse taraf yanlış seçilmiş demektir ve ters çevrilir. Kararsız (tam yarı) durumda
-    mevcut davranış (parlak = nesne) korunur."""
-    if _border_foreground_fraction(binary) > 0.5:
+    Ölçüt tamamen genel ve sahneden bağımsız: **arka plan, kırpımın dış çerçevesine DEĞEN
+    büyük bir bölge oluşturur; çerçeve içine alınmış bir nesne oluşturmaz.** İki polarite için
+    de `_border_touching_fraction` hesaplanır, hangisinde çerçeveye değen alan BÜYÜKSE o taraf
+    arka plandır. Kararsız (eşit) durumda mevcut davranış (parlak = nesne) korunur.
+
+    **Neden çerçeve PİKSELİ oylaması DEĞİL (gerçek kullanıcı raporu: "gölgeli şekillerde
+    kontür çizmekte sorun"):** eski ölçüt çerçeve piksellerinin yarısından fazlası ön plansa
+    ters çeviriyordu. Gölge de nesne gibi KOYU olduğundan, ROI çerçevesini kesen bir gölge
+    (masaya düşen gölge şeridi, vinyetleme, eşit olmayan aydınlatma) çerçevenin koyu payını
+    büyütüp bu oranı tam eşiğin etrafına düşürüyordu — gerçek yakalamalarda ölçülen değer
+    0.48/0.49 idi, yani karar kıl payıyla devriliyordu ve KATASTROFİK sonuç veriyordu: arka
+    plan "nesne" seçilip nesnenin kendisi eleniyordu (ölçülen IoU 0.01). ROI payı %35-100
+    arasında doğru, %150+ ya da %15'te yanlış karar çıkması kullanıcının "bazen çalışıyor
+    bazen çalışmıyor" gözlemini de açıklıyor.
+
+    **Ölçüm:** 11 gerçek yakalama x nesne başına 7 farklı ROI payı = 174 durum (gölgeli/
+    gradyanlı sahneler, artı regresyon kontrolü olarak parlak-nesne/koyu-zemin sahneleri).
+    Eski ölçüt 150/174 (%86), bu ölçüt 171/174 (%98). Gölge şeridi olan üç sahnede iyileşme
+    çok daha keskin: %28-42 -> %100. **Kalan 3 başarısızlığın tamamı EN DAR ROI'de** (nesne
+    kırpımın yarısından fazlasını kaplıyor ve çerçeveye kendisi değiyor): o rejimde "hangi
+    taraf arka plan" sorusu zaten iyi tanımlı değildir, ve `shape_matching_dialog.py` bu
+    durumda kullanıcıya ROI'yi biraz daha GENİŞ çizmesini söyleyen notu zaten gösteriyor.
+    Köşe doluluğunu ikinci bir sinyal olarak eklemek denendi: 174 durumda kazanç tek bir
+    vaka (%98.3 -> %98.9) olduğundan, tek ve açıklanabilir bir ilke lehine EKLENMEDİ."""
+    if _border_touching_fraction(binary) > _border_touching_fraction(cv2.bitwise_not(binary)):
         return cv2.bitwise_not(binary)
     return binary
 

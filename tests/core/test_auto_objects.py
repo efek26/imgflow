@@ -1,6 +1,7 @@
 import cv2
 import numpy as np
 
+from imgflow.core.auto_objects import _apply_auto_polarity, _border_touching_fraction
 from imgflow.core.auto_objects import detect_objects as _detect_objects_for_polarity_tests
 
 
@@ -33,6 +34,62 @@ def test_auto_polarity_keeps_bright_object_on_dark_background_unchanged():
 
     assert len(bright) == len(auto) == 1
     assert int(bright[0].mask.sum()) == int(auto[0].mask.sum())
+
+
+def _dark_object_with_shadow_crossing_the_roi_border() -> np.ndarray:
+    """Gerçek kullanıcı raporu: "gölgeli şekillerde kontür çizmekte sorun".
+
+    Açık zemin (230) üzerinde KOYU nesne (60), artı ROI çerçevesinin ÜÇ kenarını kesen bir
+    gölge şeridi (90 — nesne gibi eşik ALTINDA ama alan olarak ince). Bu, gerçek
+    yakalamalarda ölçülen durumun sentetik karşılığı: çerçeve piksellerinin çoğu koyu
+    (gölge) olduğu için eski "çerçevenin >%50'si ön plansa ters çevir" ölçütü ters çevirmeyi
+    REDDEDİP arka planı nesne sanıyordu."""
+    image = np.full((200, 200), 230, dtype=np.uint8)
+    band = 14
+    image[:band, :] = 90  # üst kenar gölgede
+    image[-band:, :] = 90  # alt kenar gölgede
+    image[:, :band] = 90  # sol kenar gölgede
+    cv2.circle(image, (100, 100), 34, 60, -1)  # nesne — çerçeveye DEĞMEZ
+    return image
+
+
+def test_auto_polarity_survives_a_shadow_crossing_the_roi_border():
+    """Gölge çerçeveyi kestiğinde de doğru taraf (koyu nesne) seçilmeli.
+
+    Bu test düzeltmeden ÖNCE (çerçeve PİKSELİ oylaması ölçütüyle) gerçekten başarısızdı:
+    ters çevirme yapılmadığı için "en büyük nesne" arka planın kendisi oluyordu."""
+    image = _dark_object_with_shadow_crossing_the_roi_border()
+
+    auto = _detect_objects_for_polarity_tests(image, polarity="auto")
+
+    assert auto
+    # Asıl mesele HANGİ TARAFIN nesne sayıldığı: tespit edilen tüm maskelerin birleşimi
+    # nesneyi (koyu daireyi) İÇERMELİ, açık zemini İÇERMEMELİ. (Bu sentetik sahnede gölge
+    # şeridi de eşiğin altında kaldığından ayrı bir bileşen olarak gelir — o yüzden "en büyük
+    # bileşen daire olsun" demek yanıltıcı olurdu; kritik olan zeminin nesne SAYILMAMASI.)
+    union = np.zeros(image.shape, dtype=bool)
+    for obj in auto:
+        union[obj.y : obj.y + obj.h, obj.x : obj.x + obj.w] |= obj.mask
+
+    assert union[100, 100]  # daire merkezi = nesne
+    assert not union[30, 100]  # açık zemin (gölge şeridinin dışında) = nesne DEĞİL
+    assert not union[100, 180]  # açık zemin, sağ taraf = nesne DEĞİL
+
+
+def test_auto_polarity_border_criterion_is_topological_not_a_pixel_vote():
+    """Ölçütün NEDEN dayanıklı olduğunu doğrudan sabitler: aynı görüntüde çerçeve PİKSEL
+    oylaması yanlış tarafı gösterirken, çerçeveye DEĞEN ALAN oranı doğru tarafı gösterir."""
+    image = _dark_object_with_shadow_crossing_the_roi_border()
+    _, binary = cv2.threshold(image, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+
+    ring = np.concatenate([binary[0, :], binary[-1, :], binary[:, 0], binary[:, -1]])
+    pixel_vote_fraction = float((ring > 0).mean())
+    # Eski ölçüt: çerçeve piksellerinin yarısından AZI ön plan -> "ters çevirme" -> YANLIŞ.
+    assert pixel_vote_fraction < 0.5
+
+    # Yeni ölçüt: parlak taraf (arka plan) çerçeveye değen alanda AÇIK ARA ile önde.
+    assert _border_touching_fraction(binary) > _border_touching_fraction(cv2.bitwise_not(binary))
+    assert not np.array_equal(_apply_auto_polarity(binary), binary)  # ters çevrildi
 
 
 def test_max_area_filters_out_a_background_sized_component():
