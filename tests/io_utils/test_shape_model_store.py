@@ -1,3 +1,5 @@
+import os
+
 import numpy as np
 import pytest
 
@@ -11,6 +13,13 @@ from imgflow.io_utils.shape_model_store import (
     rename_shape_model,
     save_shape_model,
 )
+
+
+@pytest.fixture(autouse=True)
+def _clear_load_cache():
+    shape_model_store._load_cache.clear()
+    yield
+    shape_model_store._load_cache.clear()
 
 
 def _sample_model() -> ShapeModel:
@@ -88,6 +97,71 @@ def test_rename_to_existing_name_raises_without_overwriting(tmp_path):
         rename_shape_model("model_a", "model_b", directory=tmp_path)
 
     assert sorted(list_shape_models(directory=tmp_path)) == ["model_a", "model_b"]
+
+
+def test_load_shape_model_returns_cached_object_when_mtime_unchanged(tmp_path):
+    """`geom.shape_match` canlı kamerada her tick'te `load_shape_model`'i çağırıyor —
+    dosyanın `mtime`'ı değişmediği sürece diskten TEKRAR okuyup JSON parse etmemeli. Bunu,
+    dosyayı bozup mtime'ı ESKİ değerine geri alarak kanıtlıyoruz: önbellek gerçekten
+    kullanılmıyorsa bu ikinci çağrı `json.JSONDecodeError` ile patlardı."""
+    save_shape_model("cached_model", _sample_model(), directory=tmp_path)
+    first = load_shape_model("cached_model", directory=tmp_path)
+
+    path = tmp_path / "cached_model.json"
+    original_mtime = path.stat().st_mtime
+    path.write_text("bozuk json degil", encoding="utf-8")
+    os.utime(path, (original_mtime, original_mtime))
+
+    second = load_shape_model("cached_model", directory=tmp_path)
+
+    assert second is first
+
+
+def test_load_shape_model_reloads_when_resaved_under_same_name(tmp_path):
+    """Kullanıcı `ShapeMatchingDialog`'da AYNI isimle modeli yeniden eğitip kaydedebilir —
+    bu, ONNX modellerinin aksine, "bir kere yükle sonsuza dek önbellekte tut" YETERSİZ
+    kalır. `save_shape_model` sonrası bir sonraki `load_shape_model` GÜNCEL içeriği
+    döndürmeli."""
+    save_shape_model("cached_model", _sample_model(), directory=tmp_path)
+    first = load_shape_model("cached_model", directory=tmp_path)
+
+    retrained = ShapeModel(
+        levels=[ShapeLevel(points=np.array([[9.0, 9.0]]), angles=np.array([0.5]))],
+        corners=_sample_model().corners,
+    )
+    save_shape_model("cached_model", retrained, directory=tmp_path)
+    second = load_shape_model("cached_model", directory=tmp_path)
+
+    assert second is not first
+    assert len(second.levels[0].points) == 1
+
+
+def test_load_shape_model_cache_does_not_leak_across_directories(tmp_path):
+    """Farklı `tmp_path`'lerle AYNI model ismi kullanan testler önbellek üzerinden
+    çapraz kirlenmemeli (anahtar isim+dizin çiftidir)."""
+    dir_a, dir_b = tmp_path / "a", tmp_path / "b"
+    model_b = ShapeModel(
+        levels=[ShapeLevel(points=np.array([[9.0, 9.0]]), angles=np.array([0.5]))],
+        corners=_sample_model().corners,
+    )
+    save_shape_model("same_name", _sample_model(), directory=dir_a)
+    save_shape_model("same_name", model_b, directory=dir_b)
+
+    loaded_a = load_shape_model("same_name", directory=dir_a)
+    loaded_b = load_shape_model("same_name", directory=dir_b)
+
+    assert len(loaded_a.levels[0].points) == 2
+    assert len(loaded_b.levels[0].points) == 1
+
+
+def test_delete_shape_model_invalidates_cache(tmp_path):
+    save_shape_model("silinecek", _sample_model(), directory=tmp_path)
+    load_shape_model("silinecek", directory=tmp_path)
+
+    delete_shape_model("silinecek", directory=tmp_path)
+
+    with pytest.raises(ShapeModelNotFoundError):
+        load_shape_model("silinecek", directory=tmp_path)
 
 
 def test_functions_respect_monkeypatched_default_directory_without_explicit_arg(tmp_path, monkeypatch):

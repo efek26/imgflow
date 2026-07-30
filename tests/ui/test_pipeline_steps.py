@@ -53,3 +53,37 @@ def test_refresh_reflects_pipeline_set_order(qtbot):
 
     node_ids = [panel.item(i).data(Qt.ItemDataRole.UserRole) for i in range(3)]
     assert node_ids == ["th", "src", "gray"]
+
+
+def test_apply_dropped_row_order_emits_reordered_with_previous_order(qtbot):
+    """Gerçek bir sürükle-bırak (`QDropEvent`) headless testte üretmesi zahmetli olduğu için
+    `_apply_dropped_row_order` (Qt zaten satırları yeniden sıraladıktan SONRAKİ kısım)
+    doğrudan çağrılır — bir satır elle taşınıp (Qt'nin gerçek dropEvent'inin bıraktığı son
+    durumu simüle eder) yeni sıra ÖNCEKİ sıradan farklıysa `reordered` sinyali önceki
+    sırayla yayınlanmalı."""
+    pipeline = _pipeline()
+    panel = PipelineStepsPanel(pipeline)
+    qtbot.addWidget(panel)
+    previous_order = list(pipeline.order)
+
+    item = panel.takeItem(0)
+    panel.insertItem(2, item)
+
+    with qtbot.waitSignal(panel.reordered, timeout=1000) as blocker:
+        panel._apply_dropped_row_order(previous_order)
+
+    assert blocker.args == [previous_order]
+    assert pipeline.order == ["gray", "th", "src"]
+
+
+def test_apply_dropped_row_order_does_not_emit_reordered_when_order_unchanged(qtbot):
+    pipeline = _pipeline()
+    panel = PipelineStepsPanel(pipeline)
+    qtbot.addWidget(panel)
+    previous_order = list(pipeline.order)
+
+    calls = []
+    panel.reordered.connect(lambda order: calls.append(order))
+    panel._apply_dropped_row_order(previous_order)
+
+    assert calls == []

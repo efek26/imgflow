@@ -132,3 +132,34 @@ def test_search_hides_non_matching_operators(qtbot):
                 visible_op_ids.add(child.data(0, Qt.ItemDataRole.UserRole))
 
     assert visible_op_ids == {"segment.threshold"}
+
+
+def test_categories_start_collapsed_on_refresh(qtbot):
+    """Gerçek kullanıcı isteği: "sol taraftaki operatör kütüphanesi alt başlıkları
+    gözükecek şekilde açık olmasın, ana başlıklar olsun, alt başlıklar tıklayınca açılsın"."""
+    library = OperatorLibrary(registry)
+    qtbot.addWidget(library)
+
+    assert library.tree.topLevelItemCount() > 0
+    for i in range(library.tree.topLevelItemCount()):
+        assert not library.tree.topLevelItem(i).isExpanded()
+
+
+def test_searching_expands_only_categories_with_matches_clearing_restores_collapsed(qtbot):
+    library = OperatorLibrary(registry)
+    qtbot.addWidget(library)
+
+    library.search_box.setText("threshold")
+
+    matching_category = category_for("segment.threshold")
+    for i in range(library.tree.topLevelItemCount()):
+        category_item = library.tree.topLevelItem(i)
+        if category_item.text(0) == matching_category:
+            assert category_item.isExpanded()
+        else:
+            assert not category_item.isExpanded()
+
+    library.search_box.setText("")
+
+    for i in range(library.tree.topLevelItemCount()):
+        assert not library.tree.topLevelItem(i).isExpanded()

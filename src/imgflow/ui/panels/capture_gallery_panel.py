@@ -7,7 +7,7 @@ from __future__ import annotations
 import shutil
 from pathlib import Path
 
-from PySide6.QtCore import QMimeData, Qt, QUrl
+from PySide6.QtCore import QMimeData, Qt, QUrl, Signal
 from PySide6.QtGui import QIcon, QPixmap
 from PySide6.QtWidgets import (
     QAbstractItemView,
@@ -29,7 +29,12 @@ from imgflow.ui.widgets.image_view import normalize_to_uint8, numpy_to_qimage
 _THUMB_SIZE = 96
 _ID_ROLE = Qt.ItemDataRole.UserRole
 _PATH_ROLE = Qt.ItemDataRole.UserRole + 1
-_SOURCE_LABELS = {"lens": "Lens", "height_scale": "Yükseklik-Ölçek"}
+_SOURCE_LABELS = {
+    "lens": "Lens",
+    "height_scale": "Yükseklik-Ölçek",
+    "live": "Fotoğraf",
+    "filtered": "Filtrelenmiş",
+}
 
 
 class _DraggableCaptureList(QListWidget):
@@ -54,6 +59,13 @@ class CaptureGalleryPanel(QWidget):
     `custom_filters.load_all_custom_filters`'ın aynı sebeple `cli.py`'ye taşınması). Gerçek
     uygulama açılışında `cli.py` bu metodu bir kez çağırır."""
 
+    open_requested = Signal(str)
+    """Bir kare 'Pipeline'a Yükle' ile (çift tıklama ya da context menü) seçilince yayınlanır
+    -- taşınan değer dosya yoludur (`_PATH_ROLE`). Gerçek kullanıcı isteği: "çektiğim
+    fotoğraflarda daha sonradan uzunluk bulabilmeliyim" -- eskiden bunun TEK yolu (galeriden
+    ana önizlemeye) sürükle-bırak yapmaktı, bu ikinci/keşfedilir bir giriş noktası ekler.
+    `main_window.py` bunu `open_image(path)`'e bağlar (sürükle-bırak yoluyla AYNI çağrı)."""
+
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
         self._list = _DraggableCaptureList()
@@ -65,6 +77,7 @@ class CaptureGalleryPanel(QWidget):
         self._list.setDragDropMode(QAbstractItemView.DragDropMode.DragOnly)
         self._list.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self._list.customContextMenuRequested.connect(self._on_context_menu)
+        self._list.itemDoubleClicked.connect(self._on_item_double_clicked)
 
         delete_button = QPushButton("Seçilenleri Sil")
         delete_button.clicked.connect(self._on_delete_selected)
@@ -129,6 +142,11 @@ class CaptureGalleryPanel(QWidget):
             exported += 1
         QMessageBox.information(self, "Dışa Aktarıldı", f"{exported} kare '{directory}' klasörüne kopyalandı.")
 
+    def _on_item_double_clicked(self, item: QListWidgetItem) -> None:
+        path = item.data(_PATH_ROLE)
+        if path:
+            self.open_requested.emit(path)
+
     def _on_context_menu(self, pos) -> None:
         item = self._list.itemAt(pos)
         if item is None:
@@ -136,10 +154,14 @@ class CaptureGalleryPanel(QWidget):
         if item not in self._list.selectedItems():
             self._list.setCurrentItem(item)
         menu = QMenu(self)
+        open_action = menu.addAction("Pipeline'a Yükle")
+        menu.addSeparator()
         delete_action = menu.addAction("Seçilenleri Sil")
         export_action = menu.addAction("Seçilenleri Dışa Aktar...")
         action = menu.exec(self._list.mapToGlobal(pos))
-        if action == delete_action:
+        if action == open_action:
+            self._on_item_double_clicked(item)
+        elif action == delete_action:
             self._on_delete_selected()
         elif action == export_action:
             self._on_export_selected()

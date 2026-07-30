@@ -90,6 +90,56 @@ def test_max_area_ratio_excludes_floor_sized_blob_but_keeps_small_object():
     assert out["labels"][17, 17] != 0  # küçük nesne hala etiketli
 
 
+def test_polarity_white_is_default_and_unchanged():
+    img = np.zeros((10, 10), dtype=np.uint8)
+    img[1:3, 1:3] = 255
+    img[6:9, 6:9] = 255
+
+    out = ConnectedComponentsOp().run({"image": img}, {"connectivity": "8"})
+
+    assert out["count"] == 2
+    assert out["labels"][1, 1] != 0  # beyaz blok etiketli
+    assert out["labels"][0, 0] == 0  # siyah zemin etiketsiz
+
+
+def test_polarity_black_labels_dark_regions_instead():
+    img = np.full((10, 10), 255, dtype=np.uint8)
+    img[1:3, 1:3] = 0
+    img[6:9, 6:9] = 0
+
+    out = ConnectedComponentsOp().run({"image": img}, {"connectivity": "8", "polarity": "black"})
+
+    assert out["count"] == 2
+    assert out["labels"][1, 1] != 0  # siyah blok artık etiketli
+    assert out["labels"][0, 0] == 0  # beyaz zemin etiketsiz
+
+
+def test_polarity_both_labels_white_and_black_blobs_with_distinct_ids():
+    img = np.zeros((10, 10), dtype=np.uint8)
+    img[1:3, 1:3] = 255  # beyaz blok, zeminden (siyah) ayrık değil -- zeminle birleşir
+
+    out = ConnectedComponentsOp().run({"image": img}, {"connectivity": "8", "polarity": "both"})
+
+    # tüm görüntü ya beyaz bloğa ya da siyah zemine ait -- etiketsiz (0) piksel kalmamalı
+    assert np.all(out["labels"] != 0)
+    white_label = out["labels"][1, 1]
+    black_label = out["labels"][0, 0]
+    assert white_label != black_label
+    assert out["count"] == 2  # 1 beyaz blok + 1 siyah zemin bloğu
+
+
+def test_polarity_both_on_already_binary_two_blob_image_finds_three_regions():
+    img = np.zeros((10, 10), dtype=np.uint8)
+    img[1:3, 1:3] = 255
+    img[6:9, 6:9] = 255
+
+    out = ConnectedComponentsOp().run({"image": img}, {"connectivity": "8", "polarity": "both"})
+
+    # 2 ayrık beyaz blok + aralarındaki/etraflarındaki tek bir bağlı siyah zemin bloğu = 3
+    assert out["count"] == 3
+    assert np.all(out["labels"] != 0)
+
+
 def test_max_area_ratio_zero_disables_filtering_by_default():
     img = np.zeros((20, 20), dtype=np.uint8)
     img[0:20, 0:15] = 255

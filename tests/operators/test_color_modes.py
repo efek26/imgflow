@@ -66,7 +66,12 @@ def test_hsv_default_returns_bgr_shaped_image():
     assert out["image"].shape == img.shape
 
 
-def test_hsv_apply_mask_returns_binary_mask():
+def test_hsv_apply_mask_keeps_color_instead_of_turning_binary():
+    """Gerçek kullanıcı raporu: "hsv filtresi otomatik siyah beyaza çeviriyor çevirmemesi
+    lazım" -- eskiden `apply_mask` açıkken ham `cv2.inRange` sonucu (tek kanallı 0/255 ikili
+    görüntü) döndürülüyordu, yani filtre HER ZAMAN görüntüyü siyah/beyaza çeviriyordu. Artık
+    aralık İÇİNDEKİ pikseller ORİJİNAL rengiyle korunuyor, sadece aralık DIŞINDAKİLER siyaha
+    boyanıyor -- görüntü HER ZAMAN 3 kanallı (renkli) kalıyor."""
     img = np.zeros((4, 4, 3), dtype=np.uint8)
     img[:2, :2] = (0, 255, 0)  # yeşil bölge
     out = HsvOp().run(
@@ -81,6 +86,7 @@ def test_hsv_apply_mask_returns_binary_mask():
             "v_max": 255,
         },
     )
-    assert out["image"].ndim == 2
-    assert out["image"][0, 0] == 255
-    assert out["image"][3, 3] == 0
+    assert out["image"].ndim == 3
+    assert out["image"].shape == img.shape
+    assert tuple(out["image"][0, 0]) == (0, 255, 0)  # aralık içi: orijinal renk korunur
+    assert tuple(out["image"][3, 3]) == (0, 0, 0)  # aralık dışı: siyah

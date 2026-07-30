@@ -130,7 +130,11 @@ def test_draw_measurements_overlay_shows_cm_not_mm_when_calibrated():
         "obb_h": 10.0,
         "obb_angle": 0.0,
     }
-    base = np.zeros((60, 60, 3), dtype=np.uint8)  # boyut metninin (kutunun altında) sığması için 20x20'den büyük
+    # Genişlik 220px -- "10 x 10 px (1.00 x 1.00 cm)" metninin (px+cm ikisi de yazıldığından,
+    # bkz. `draw_measurements_overlay` docstring'i) TAMAMI görünür alana sığmalı; dar bir
+    # tuval (ör. eski 60x60) metnin farklılaşan kısmını görünmez alana taşırıp bu testi
+    # (calibrated == uncalibrated) YANLIŞ pozitif geçirebiliyordu.
+    base = np.zeros((60, 220, 3), dtype=np.uint8)
 
     # mm_per_px=1.0 -> 10px * 1.0mm/px = 10mm = 1.00cm; sadece çökmediğini ve mm_per_px<=0
     # (px) yolundan FARKLI bir görüntü ürettiğini doğrular (metin OCR olmadan doğrudan

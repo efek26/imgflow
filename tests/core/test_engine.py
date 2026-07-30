@@ -186,3 +186,57 @@ def test_inject_result_on_leaf_node_does_not_dirty_ancestors():
     assert op_a.call_count == 1
     assert op_b.call_count == 1
     assert op_c.call_count == 1  # leaf enjekte edildiği için yeniden çalışmadı, doğrudan cache'ten döndü
+
+
+def test_evaluate_records_duration_only_for_actually_executed_nodes():
+    """Gerçek kullanıcı isteği: "her işlemin sonucunun süresi sonuçlar kısmında yazmalı" --
+    `durations` SADECE gerçekten çalıştırılan node'lar için dolmalı; cache-hit'te (bkz.
+    `test_evaluate_uses_cache_when_nothing_dirty`) süre GÜNCELLENMEMELİ (eski değer duruyor
+    olabilir ama yeniden YAZILMAMALI -- burada basitçe anahtarın varlığı ve pozitifliği
+    kontrol ediliyor)."""
+    engine, (op_a, op_b, op_c) = linear_setup()
+
+    engine.evaluate("nc")
+
+    assert set(engine.durations) == {"na", "nb", "nc"}
+    assert all(d >= 0.0 for d in engine.durations.values())
+
+
+def test_evaluate_does_not_record_duration_for_failed_or_skipped_nodes():
+    op_a = make_counting_op("a", raises=True)
+    op_b = make_counting_op("b")
+    g = Graph()
+    g.add_node(Node("na", "a"))
+    g.add_node(Node("nb", "b"))
+    g.add_edge(Edge(("na", "out"), ("nb", "in")))
+    engine = ExecutionEngine(g, registry=FakeRegistry({"a": op_a, "b": op_b}))
+
+    engine.evaluate("nb")
+
+    # na'nın `run()`'ı fırladı (istisna) -> süre hiç yazılmadı (sadece BAŞARILI çalıştırma
+    # süreyi kaydeder, bkz. `ExecutionEngine.evaluate`). nb ise üst akış hatası yüzünden
+    # HİÇ çalıştırılmadı (`op_b.call_count == 0`) -> onun da süresi YOK.
+    assert "na" not in engine.durations
+    assert "nb" not in engine.durations
+
+
+def test_evaluate_does_not_record_duration_for_cache_hit_skip():
+    engine, (op_a, op_b, op_c) = linear_setup()
+    engine.evaluate("nc")
+    first_na_duration = engine.durations["na"]
+
+    engine.mark_dirty("nb")  # na hâlâ temiz -> cache-hit ile atlanmalı
+    engine.evaluate("nc")
+
+    assert engine.durations["na"] == first_na_duration  # yeniden yazılmadı
+    assert op_a.call_count == 1  # gerçekten de yeniden çalışmadı
+
+
+def test_durations_property_returns_a_copy():
+    engine, (op_a, op_b, op_c) = linear_setup()
+    engine.evaluate("nc")
+
+    durations = engine.durations
+    durations["na"] = -1.0
+
+    assert engine.durations["na"] != -1.0

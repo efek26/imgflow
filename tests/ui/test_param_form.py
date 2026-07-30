@@ -225,6 +225,55 @@ def test_string_param_with_dynamic_choices_emits_on_change(qtbot):
     assert received == [{"model_name": "b"}]
 
 
+def test_dynamic_choice_combo_autoselect_syncs_value_when_stored_value_is_empty(qtbot):
+    # Gerçek kullanıcı raporu: kayıtlı bir referans/model varken (ör. "deneme1"), boş
+    # (`""`) saklanmış bir düğüm parametresiyle form kurulunca Qt, QComboBox'a `addItems()`
+    # ile öğe eklenir eklenmez OTOMATİK olarak ilk öğeyi ("deneme1") seçili gösteriyordu --
+    # ama bu, sinyal bağlantısından ÖNCE olduğu için `self._values`'e hiç yansımıyordu.
+    # Sonuç: ekranda dolu görünen bir alan aslında hâlâ boştu, kullanıcı hiç dokunmasa bile
+    # operatör "parametre boş olamaz" hatası vermeye devam ediyordu.
+    form = ParamForm()
+    qtbot.addWidget(form)
+    spec = ParamSpec("reference_name", ParamType.STRING, default="", dynamic_choices=lambda: ["deneme1", "b"])
+
+    received = []
+    form.params_changed.connect(received.append)
+    form.set_params([spec], {"reference_name": ""})
+
+    widget = form.widget_for("reference_name")
+    assert widget.currentText() == "deneme1"
+    # Widget'ın gösterdiği değerle `_values`/dışarı yayılan değer artık SENKRON olmalı.
+    assert form.values()["reference_name"] == "deneme1"
+    assert received == [{"reference_name": "deneme1"}]
+
+
+def test_dynamic_choice_combo_no_spurious_emit_when_value_already_matches(qtbot):
+    form = ParamForm()
+    qtbot.addWidget(form)
+    spec = ParamSpec("model_name", ParamType.STRING, default="", dynamic_choices=lambda: ["a", "b"])
+
+    received = []
+    form.params_changed.connect(received.append)
+    form.set_params([spec], {"model_name": "a"})
+
+    assert received == []  # zaten senkron -- gereksiz bir "düzeltme" sinyali yayılmamalı
+
+
+def test_enum_combo_autoselect_syncs_value_when_stored_value_not_in_choices(qtbot):
+    form = ParamForm()
+    qtbot.addWidget(form)
+    specs = [ParamSpec("mode", ParamType.ENUM, default="BINARY", choices=["BINARY", "OTSU"])]
+
+    received = []
+    form.params_changed.connect(received.append)
+    # Eski bir reçetede/kayıtta artık geçerli olmayan bir değer (ör. kaldırılmış bir seçenek).
+    form.set_params(specs, {"mode": "ARTIK_GECERSIZ"})
+
+    assert form.widget_for("mode").currentText() == "BINARY"
+    assert form.values()["mode"] == "BINARY"
+    assert received == [{"mode": "BINARY"}]
+
+
 def test_multi_select_widget_is_editable_line_edit_showing_current_value(qtbot):
     form = ParamForm()
     qtbot.addWidget(form)

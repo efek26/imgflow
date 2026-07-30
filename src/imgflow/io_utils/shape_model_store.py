@@ -23,6 +23,17 @@ from imgflow.core.shape_matching import ShapeModel
 
 SHAPE_MODEL_DIR = Path.home() / ".imgflow" / "shape_models"
 
+_load_cache: dict[tuple[str, str], tuple[float, ShapeModel]] = {}
+"""(isim, çözümlenmiş dizin) -> (dosyanın son değişim zamanı, yüklenen model). `geom.shape_
+match` operatörü canlı kamerada HER tick'te (100ms bütçe) `load_shape_model`'i çağırıyor —
+`onnx_detection.py::_session_cache`'teki AYNI gerekçeyle (disk okuma + JSON parse + numpy
+dizisi yeniden kurma pahalı) önbelleğe alınır. ONNX modellerinin aksine şekil modelleri AYNI
+oturumda `ShapeMatchingDialog`'da yeniden eğitilip AYNI isimle kaydedilebiliyor, bu yüzden
+"bir kere yükle sonsuza dek tut" YETMEZ — dosyanın `mtime`'ı da saklanıp her çağrıda
+kontrol edilir, değiştiyse (yeniden kaydedildiyse) önbellek bayatlamadan atlanıp yeniden
+okunur. Dizin anahtara DAHİL edilir ki testler farklı `tmp_path`'lerle aynı model ismini
+kullandığında önbellek çapraz kirlenmesin."""
+
 
 class ShapeModelNotFoundError(Exception):
     """Kayıtlı olmayan bir model adı `load_shape_model` ile istendiğinde fırlatılır."""
@@ -43,19 +54,35 @@ def _path_for(name: str, directory: Path | None = None) -> Path:
     return _resolve_dir(directory) / f"{_slugify(name)}.json"
 
 
+def _cache_key(name: str, directory: Path | None) -> tuple[str, str]:
+    return (name, str(_resolve_dir(directory)))
+
+
 def save_shape_model(name: str, model: ShapeModel, directory: Path | None = None) -> None:
     directory = _resolve_dir(directory)
     directory.mkdir(parents=True, exist_ok=True)
     payload = {"name": name, "model": model.to_dict()}
     _path_for(name, directory).write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+    # `mtime` kontrolü ÇOĞU dosya sisteminde yeterli, ama sınırlı zaman damgası çözünürlüğü
+    # olan dosya sistemlerinde aynı-saniye içinde kaydet+yükle senaryosuna karşı ekstra
+    # güvenlik için önbellek burada da EXPLICIT temizlenir.
+    _load_cache.pop(_cache_key(name, directory), None)
 
 
 def load_shape_model(name: str, directory: Path | None = None) -> ShapeModel:
     path = _path_for(name, directory)
+    key = _cache_key(name, directory)
     if not path.exists():
+        _load_cache.pop(key, None)
         raise ShapeModelNotFoundError(f"'{name}' adında kayıtlı bir şekil modeli bulunamadı.")
+    mtime = path.stat().st_mtime
+    cached = _load_cache.get(key)
+    if cached is not None and cached[0] == mtime:
+        return cached[1]
     data = json.loads(path.read_text(encoding="utf-8"))
-    return ShapeModel.from_dict(data["model"])
+    model = ShapeModel.from_dict(data["model"])
+    _load_cache[key] = (mtime, model)
+    return model
 
 
 def list_shape_models(directory: Path | None = None) -> list[str]:
@@ -73,6 +100,7 @@ def list_shape_models(directory: Path | None = None) -> list[str]:
 
 
 def delete_shape_model(name: str, directory: Path | None = None) -> None:
+    _load_cache.pop(_cache_key(name, directory), None)
     _path_for(name, directory).unlink(missing_ok=True)
 
 
@@ -89,5 +117,7 @@ def rename_shape_model(old_name: str, new_name: str, directory: Path | None = No
     data = json.loads(old_path.read_text(encoding="utf-8"))
     data["name"] = new_name
     new_path.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+    _load_cache.pop(_cache_key(old_name, directory), None)
+    _load_cache.pop(_cache_key(new_name, directory), None)
     if new_path != old_path:
         old_path.unlink()

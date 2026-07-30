@@ -13,6 +13,7 @@ _NODE_ID_ROLE = Qt.ItemDataRole.UserRole
 class PipelineStepsPanel(QListWidget):
     step_selected = Signal(str)
     order_changed = Signal()
+    reordered = Signal(list)  # previous_order (str listesi) - sürükle-bırak ile yeniden sıralamadan HEMEN önceki sıra
 
     def __init__(self, pipeline: LinearPipeline, parent=None) -> None:
         super().__init__(parent)
@@ -41,10 +42,23 @@ class PipelineStepsPanel(QListWidget):
                 return
 
     def dropEvent(self, event) -> None:  # noqa: N802 - Qt override
-        super().dropEvent(event)
+        previous_order = list(self.pipeline.order)
+        super().dropEvent(event)  # Qt satırları taşır
+        self._apply_dropped_row_order(previous_order)
+
+    def _apply_dropped_row_order(self, previous_order: list[str]) -> None:
+        """Qt satırları yeniden sıraladıktan SONRA çalışan kısım: yeni satır sırasını
+        pipeline'a yazar ve GERÇEKTEN değiştiyse sinyalleri yayar. `dropEvent`'ten ayrı bir
+        metot olmasının sebebi, gerçek bir `QDropEvent` üretmenin headless testte zahmetli
+        olması -- testler bu kısmı doğrudan çağırabilir (bkz. `tests/ui/test_pipeline_steps.py`).
+        Sıra DEĞİŞMEDİYSE (kullanıcı öğeyi aynı yere bıraktı) hiçbir sinyal yayılmaz, aksi
+        halde boş bir undo adımı kaydedilir ve pipeline gereksiz yere baştan hesaplanırdı."""
         new_order = [self.item(i).data(_NODE_ID_ROLE) for i in range(self.count())]
         self.pipeline.set_order(new_order)
         self.refresh()
+        if new_order == previous_order:
+            return
+        self.reordered.emit(previous_order)
         self.order_changed.emit()
 
     def _on_current_changed(self, current, previous) -> None:

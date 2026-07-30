@@ -162,6 +162,55 @@ def test_list_supports_drag_out_as_file_urls(qtbot):
     assert Path(mime.urls()[0].toLocalFile()) == record.path
 
 
+def test_double_clicking_item_emits_open_requested_with_path(qtbot):
+    """Gerçek kullanıcı isteği: "çektiğim fotoğraflarda daha sonradan uzunluk bulabilmeliyim"
+    -- eskiden bir kareyi pipeline'a yüklemenin TEK yolu sürükle-bırak yapmaktı, çift tıklama
+    ikinci/keşfedilir bir yol ekler."""
+    capture_store.save_capture(_image(), source="lens")
+    panel = CaptureGalleryPanel()
+    qtbot.addWidget(panel)
+    panel.refresh()
+
+    received = []
+    panel.open_requested.connect(received.append)
+    panel._list.itemDoubleClicked.emit(panel._list.item(0))
+
+    record = capture_store.list_captures()[0]
+    assert received == [str(record.path)]
+
+
+def test_context_menu_load_into_pipeline_action_emits_open_requested(qtbot, monkeypatch):
+    capture_store.save_capture(_image(), source="lens")
+    panel = CaptureGalleryPanel()
+    qtbot.addWidget(panel)
+    panel.refresh()
+
+    received = []
+    panel.open_requested.connect(received.append)
+
+    class _FakeMenu:
+        def __init__(self, *a, **k):
+            self.actions = []
+
+        def addAction(self, text):
+            action = object()
+            self.actions.append((text, action))
+            return action
+
+        def addSeparator(self):
+            pass
+
+        def exec(self, *a, **k):
+            return self.actions[0][1]  # "Pipeline'a Yükle" -- ilk eklenen aksiyon
+
+    monkeypatch.setattr("imgflow.ui.panels.capture_gallery_panel.QMenu", _FakeMenu)
+
+    panel._on_context_menu(panel._list.visualItemRect(panel._list.item(0)).center())
+
+    record = capture_store.list_captures()[0]
+    assert received == [str(record.path)]
+
+
 def test_export_selected_cancelled_dialog_does_nothing(qtbot, tmp_path, monkeypatch):
     capture_store.save_capture(_image(), source="lens")
     panel = CaptureGalleryPanel()

@@ -22,6 +22,7 @@ dev = [
     "pyinstaller>=6.5",
     "pyinstaller-hooks-contrib>=2024.0",
     "onnx>=1.15",
+    "pillow>=10.0",
 ]
 camera = [
     "pypylon>=3.0",

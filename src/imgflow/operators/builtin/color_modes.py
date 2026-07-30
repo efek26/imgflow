@@ -231,7 +231,7 @@ class HsvOp:
             ParamType.BOOL,
             default=False,
             label="Renk Aralığı Maskesi",
-            help="Sadece aşağıdaki H/S/V aralığındaki pikselleri beyaz, geri kalanını siyah yapar; belirli bir renkteki nesneyi (ör. yeşil etiket) ayıklamak için kullanılır.",
+            help="Sadece aşağıdaki H/S/V aralığındaki pikselleri KENDİ RENGİYLE bırakır, geri kalanını siyaha boyar; belirli bir renkteki nesneyi (ör. yeşil etiket) ayıklamak için kullanılır. Çıktı renkli (3 kanallı) kalır.",
         ),
         ParamSpec(
             "h_min", ParamType.INT, default=0, min=0, max=179, label="H Min", help="Renk tonu alt sınırı (0-179)."
@@ -271,6 +271,12 @@ class HsvOp:
                 dtype=np.uint8,
             )
             mask = cv2.inRange(hsv, lower, upper)
-            return {"image": mask}
+            # Gerçek kullanıcı raporu: "hsv filtresi otomatik siyah beyaza çeviriyor
+            # çevirmemesi lazım" -- eskiden ham `inRange` sonucu (tek kanallı 0/255 ikili
+            # görüntü) döndürülüyordu, yani filtre HER ZAMAN görüntüyü siyah/beyaza
+            # çeviriyordu. Artık aralık İÇİNDEKİ pikseller ORİJİNAL rengiyle korunur, sadece
+            # aralık DIŞINDAKİLER siyaha boyanır -- çıktı her zaman 3 kanallı (renkli) kalır.
+            bgr = cv2.cvtColor(hsv, cv2.COLOR_HSV2BGR)
+            return {"image": cv2.bitwise_and(bgr, bgr, mask=mask)}
 
         return {"image": cv2.cvtColor(hsv, cv2.COLOR_HSV2BGR)}

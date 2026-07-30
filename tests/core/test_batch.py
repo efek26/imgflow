@@ -70,3 +70,55 @@ def test_run_batch_records_error_for_unreadable_image(tmp_path):
     assert len(rows) == 1
     assert rows[0]["image"] == "corrupt.png"
     assert "error" in rows[0]
+
+
+def _make_input_dir(tmp_path, count: int):
+    input_dir = tmp_path / "images"
+    input_dir.mkdir()
+    for i in range(count):
+        img = np.full((10, 10, 3), 200, dtype=np.uint8)
+        cv2.imwrite(str(input_dir / f"img_{i}.png"), img)
+    return input_dir
+
+
+def test_run_batch_reports_progress_per_image(tmp_path):
+    input_dir = _make_input_dir(tmp_path, 3)
+    progress_calls = []
+
+    run_batch(
+        _make_pipeline(),
+        "props",
+        input_dir,
+        tmp_path / "out.csv",
+        registry=registry,
+        progress_callback=lambda done, total: progress_calls.append((done, total)),
+    )
+
+    assert progress_calls == [(1, 3), (2, 3), (3, 3)]
+
+
+def test_run_batch_stops_early_when_should_cancel_returns_true(tmp_path):
+    """İptal isteği geldiğinde döngü erken durmalı ama o ana kadarki sonuçlar (KISMİ
+    tamamlanma) yine de döndürülüp CSV'ye yazılmalı — bir resmin hatası batch'i durdurmadığı
+    gibi, kullanıcının iptali de mevcut ilerlemeyi kaybettirmemeli."""
+    input_dir = _make_input_dir(tmp_path, 5)
+    cancel_after = 2
+    calls = {"count": 0}
+
+    def should_cancel():
+        return calls["count"] >= cancel_after
+
+    def progress_callback(done, total):
+        calls["count"] = done
+
+    rows = run_batch(
+        _make_pipeline(),
+        "props",
+        input_dir,
+        tmp_path / "out.csv",
+        registry=registry,
+        progress_callback=progress_callback,
+        should_cancel=should_cancel,
+    )
+
+    assert len(rows) == cancel_after

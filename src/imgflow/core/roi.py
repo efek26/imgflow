@@ -6,6 +6,7 @@ ile döndürülmüş/serbest biçimli (poligon) bölgeler ayrı bir tipte ele al
 
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass
 
 
@@ -47,3 +48,28 @@ class RoiCircle:
         cx = max(r, min(self.cx, image_w - r))
         cy = max(r, min(self.cy, image_h - r))
         return RoiCircle(cx, cy, r)
+
+
+def parse_roi_list(data: str, image_w: int, image_h: int) -> list[RoiRect]:
+    """`analysis.color_props`/`analysis.texture_props`'un "Elle ROI Çiz" modu için:
+    `RoiCanvas`'ta fare ile çizilen dikdörtgenlerin JSON-kodlanmış listesini
+    (`"[[x,y,w,h], ...]"`) `RoiRect`'e çevirir, her birini görüntü sınırlarına kırpar,
+    bozuk/boş girdileri sessizce eler (canvas zaten geçerli dikdörtgenler üretir, ama
+    JSON elle bozulursa -- ör. reçete dosyası elle düzenlenirse -- pipeline çökmemeli)."""
+    try:
+        raw = json.loads(data)
+    except (ValueError, TypeError):
+        return []
+    if not isinstance(raw, list):
+        return []
+
+    rois: list[RoiRect] = []
+    for item in raw:
+        try:
+            x, y, w, h = (int(v) for v in item)
+        except (TypeError, ValueError):
+            continue
+        rect = RoiRect(x, y, w, h).clamp(image_w, image_h)
+        if rect.w > 0 and rect.h > 0:
+            rois.append(rect)
+    return rois

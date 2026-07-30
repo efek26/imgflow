@@ -1,0 +1,148 @@
+import cv2
+import numpy as np
+
+from imgflow.core.auto_objects import detect_objects
+
+
+def _two_blob_image() -> np.ndarray:
+    # 40x40 siyah zemin, iki ayrı (aralarında boşluk olan) kare -- ikisi de AYNI gri-seviye
+    # parlaklığa (~100) sahip ama farklı renkte (biri kırmızıya, biri maviye çalan), böylece
+    # Otsu eşiklemesi (parlaklık bazlı) ikisini de aynı "ön plan" tarafına koyar ve ayrım
+    # sadece bağlı bileşen analizinin aralarındaki boşluğu görmesiyle yapılır -- gerçek
+    # kullanım senaryosuyla (farklı renkli ama benzer parlaklıkta ürünler/balonlar) aynı.
+    image = np.zeros((40, 40, 3), dtype=np.uint8)
+    image[5:15, 5:15] = (0, 40, 255)  # kırmızıya çalan (BGR), gray≈100
+    image[25:35, 20:30] = (255, 121, 0)  # maviye çalan (BGR), gray≈100
+    return image
+
+
+def test_detects_each_separate_blob():
+    objects = detect_objects(_two_blob_image())
+
+    assert len(objects) == 2
+    areas = sorted((obj.w * obj.h for obj in objects))
+    assert areas == [100, 100]
+
+
+def test_bbox_and_mask_match_blob_location():
+    objects = detect_objects(_two_blob_image())
+    by_x = sorted(objects, key=lambda obj: obj.x)
+
+    first = by_x[0]
+    assert (first.x, first.y, first.w, first.h) == (5, 5, 10, 10)
+    assert first.mask.all()  # kare tamamen dolu, kırpım içinde tüm pikseller nesneye ait
+
+    second = by_x[1]
+    assert (second.x, second.y, second.w, second.h) == (20, 25, 10, 10)
+
+
+def test_min_area_filters_small_blobs():
+    image = _two_blob_image()
+    image[0:2, 0:2] = (0, 255, 0)  # 4 piksellik küçük yeşil gürültü lekesi
+
+    objects = detect_objects(image, min_area=10.0)
+
+    assert len(objects) == 2  # küçük leke elenmiş olmalı
+
+
+def test_empty_image_returns_no_objects():
+    image = np.zeros((20, 20, 3), dtype=np.uint8)
+    assert detect_objects(image) == []
+
+
+def test_max_area_filters_large_blobs():
+    image = np.zeros((60, 60, 3), dtype=np.uint8)
+    image[5:15, 5:15] = (0, 40, 255)  # 100 px²
+    image[25:35, 20:30] = (255, 121, 0)  # 100 px²
+    image[40:60, 40:60] = (0, 40, 255)  # 400 px² -- ayrı bir bölgede, diğerlerinden çok büyük
+
+    objects = detect_objects(image, max_area=150.0)
+
+    assert len(objects) == 2
+    assert all(obj.w * obj.h == 100 for obj in objects)
+
+
+def test_manual_threshold_recovers_blob_that_otsu_excludes():
+    # Gerçek kullanıcı sorunu: iki nesnenin parlaklığı (gri seviyesi) BİRBİRİNDEN çok
+    # farklıysa (ör. biri parlak ışık yansımalı, diğeri daha donuk), tek bir GLOBAL Otsu
+    # eşiği ikisini AYNI ANDA "ön plan" sayamayabilir -- burada kırmızı (gray≈76) ve mavi
+    # (gray≈29) kare, siyah (0) zemine göre Otsu'da SADECE kırmızı ön plan sayılır.
+    image = np.zeros((40, 40, 3), dtype=np.uint8)
+    image[5:15, 5:15] = (0, 0, 255)  # kırmızı, gray≈76
+    image[25:35, 20:30] = (255, 0, 0)  # mavi, gray≈29
+
+    otsu_objects = detect_objects(image)
+    assert len(otsu_objects) == 1  # mavi kare Otsu tarafından arka plan sayılıp kaçırılıyor
+
+    manual_objects = detect_objects(image, threshold_mode="manual", threshold_value=15)
+    assert len(manual_objects) == 2  # elle düşük bir eşikle her ikisi de yakalanır
+
+
+def test_fill_holes_merges_object_split_by_bright_reflection():
+    # Bir nesnenin İÇİNDE ışık yansımasından kalan eşik-altı bir "delik" varsa (ör. donuk
+    # gövdeli ama ortasında parlak bir highlight olan bir balon), delik doldurulmadan
+    # bağlı bileşen analizi nesneyi ikiye bölebilir/küçük gösterebilir; fill_holes=True
+    # dış konturu doldurup tek parça nesne olarak sayar.
+    image = np.zeros((30, 30), dtype=np.uint8)
+    image[5:25, 5:25] = 200  # nesne gövdesi
+    image[13:17, 13:17] = 0  # ortasında eşik-altı bir "delik" (koyu yansıma gölgesi)
+
+    without_fill = detect_objects(image)
+    assert without_fill[0].w * without_fill[0].h - int(without_fill[0].mask.sum()) > 0
+
+    with_fill = detect_objects(image, fill_holes=True)
+    assert len(with_fill) == 1
+    assert with_fill[0].mask.all()  # delik doldurulduğu için kırpım TAMAMEN dolu
+
+
+def test_robust_edge_assist_recovers_filled_interior_otsu_alone_misses():
+    """Gerçek kullanıcı isteği: "daha sağlam olsun, biraz yavaşlasa da olur" (bkz.
+    `shape_matching_dialog.py::_build_auto_contour_mask`, eğitim TEK SEFERLİK olduğundan
+    performans kısıtı yok). Bir nesnenin İÇİ arka planla AYNI parlaklıktaysa (Otsu bunu
+    AYIRAMAZ) ama nesnenin KENARI farklı bir parlaklıktaysa (net bir Canny kenarı vardır),
+    salt Otsu SADECE ince kenar halkasını "nesne" sayar (içini DOLDURAMAZ); `robust=True`
+    kenar-tabanlı doldurma ile nesnenin GERÇEK (dolu) alanını kurtarır."""
+    image = np.full((60, 60), 100, dtype=np.uint8)  # zemin VE nesnenin İÇİ aynı parlaklıkta
+    cv2.rectangle(image, (15, 15), (45, 45), color=180, thickness=3)  # sadece KENARI farklı
+
+    plain_objects = detect_objects(image)
+    robust_objects = detect_objects(image, robust=True)
+
+    assert len(plain_objects) == 1
+    assert len(robust_objects) == 1
+    plain_area = int(plain_objects[0].mask.sum())
+    robust_area = int(robust_objects[0].mask.sum())
+    # Salt Otsu sadece ince kenar halkasını yakalar (dolu 30x30=900'e göre KÜÇÜK);
+    # robust=True nesnenin GERÇEK dolu alanına çok daha yakın, AÇIKÇA daha büyük bir alan bulur.
+    assert robust_area > plain_area * 2
+
+
+def test_robust_false_default_leaves_existing_behavior_unchanged():
+    """`robust=False` (varsayılan -- `color_props`/`texture_props`'un canlı-kamera yolu)
+    davranış/performans BİREBİR eskisi gibi kalmalı."""
+    image = _two_blob_image()
+
+    default_objects = detect_objects(image)
+    explicit_false_objects = detect_objects(image, robust=False)
+
+    assert len(default_objects) == len(explicit_false_objects) == 2
+    for a, b in zip(
+        sorted(default_objects, key=lambda o: o.x), sorted(explicit_false_objects, key=lambda o: o.x)
+    ):
+        assert (a.x, a.y, a.w, a.h) == (b.x, b.y, b.w, b.h)
+        assert np.array_equal(a.mask, b.mask)
+
+
+def test_close_kernel_bridges_thin_gap_between_blob_parts():
+    # Nesne sınırında ince bir kopukluk (ör. parlamanın kenarda bıraktığı 1px'lik eşik-altı
+    # çizgi) aynı nesneyi iki ayrı bileşene bölebilir; close_kernel_size bunu köprüler.
+    image = np.zeros((20, 40), dtype=np.uint8)
+    image[5:15, 2:18] = 200
+    image[5:15, 18:19] = 0  # 1px'lik kopukluk
+    image[5:15, 19:35] = 200
+
+    without_close = detect_objects(image)
+    assert len(without_close) == 2
+
+    with_close = detect_objects(image, close_kernel_size=3)
+    assert len(with_close) == 1

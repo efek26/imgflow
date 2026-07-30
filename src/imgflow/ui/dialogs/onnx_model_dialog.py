@@ -31,19 +31,19 @@ from PySide6.QtWidgets import (
     QVBoxLayout,
 )
 
+from imgflow.core.onnx_detection import inspect_onnx_model
 from imgflow.io_utils import onnx_model_store
 
 _GUIDE_TEXT = (
-    "imgflow DIŞINDA (ör. Ultralytics YOLO ile) eğitilmiş bir '.onnx' dosyası seçin, model "
-    "türünü/giriş boyutunu/virgülle ayrılmış sınıf isimlerini girip 'Kaydet'. Pipeline'da "
-    "'Yapay Zeka (ONNX)' kategorisindeki operatörde bu isim 'Model(ler)' açılır listesinden "
-    "seçilebilir. Şu an SADECE 'YOLO' türü çalıştırılabilir; diğerleri (yakında) ileride "
-    "eklenecek."
+    "imgflow DIŞINDA (ör. Ultralytics YOLO ile) eğitilmiş bir '.onnx' dosyası seçin — sınıf "
+    "isimleri ve giriş boyutu, modelin kendi metadata'sından OTOMATİK doldurulur (okunamazsa "
+    "elle girersiniz) — model türünü seçip 'Kaydet'. Pipeline'da 'Yapay Zeka (ONNX)' "
+    "kategorisindeki operatörde bu isim 'Model(ler)' açılır listesinden seçilebilir."
 )
 _TASK_TYPE_LABELS = {
     onnx_model_store.TASK_TYPE_YOLO: "YOLO",
-    onnx_model_store.TASK_TYPE_CLASSIFICATION: "Sınıflandırma / Anomali (yakında)",
-    onnx_model_store.TASK_TYPE_SEGMENTATION: "Segmentasyon (yakında)",
+    onnx_model_store.TASK_TYPE_CLASSIFICATION: "Sınıflandırma / Anomali",
+    onnx_model_store.TASK_TYPE_SEGMENTATION: "Segmentasyon",
 }
 _TASK_TYPE_BY_LABEL = {label: task_type for task_type, label in _TASK_TYPE_LABELS.items()}
 
@@ -130,7 +130,29 @@ class OnnxModelDialog(QDialog):
         self._selected_onnx_path = Path(path)
         self._path_label.setText(path)
         self._save_button.setEnabled(True)
-        self._status_label.setText("")
+        self._autofill_from_model(self._selected_onnx_path)
+
+    def _autofill_from_model(self, path: Path) -> None:
+        """Sınıf isimlerini ve giriş boyutunu modelin KENDİ metadata'sından doldurur — böylece
+        kullanıcı virgüllü listeyi elle yeniden yazmaz ve SIRA uyuşmazlığından doğan sessiz
+        yanlış etiketleme (gerçek kullanıcı şikayeti: "sınıflandırmalar bozuk/hatalı gibi
+        geliyor") olmaz. Okunamayan/bozuk dosyada (bkz. `inspect_onnx_model` ASLA fırlatmaz)
+        alanlar DEĞİŞMEDEN bırakılır ve kullanıcı elle girmeye yönlendirilir."""
+        info = inspect_onnx_model(path)
+        filled = []
+        if info["class_labels"]:
+            self._class_labels_edit.setText(", ".join(info["class_labels"]))
+            filled.append("sınıf isimleri")
+        if info["input_size"]:
+            self._input_size_spin.setValue(info["input_size"])
+            filled.append("giriş boyutu")
+
+        if filled:
+            self._status_label.setText(f"Modelden otomatik okundu: {' ve '.join(filled)}.")
+        else:
+            self._status_label.setText(
+                "Model metadata'sı okunamadı — sınıf isimlerini ve giriş boyutunu elle girin."
+            )
 
     def _on_save(self) -> None:
         if self._selected_onnx_path is None:

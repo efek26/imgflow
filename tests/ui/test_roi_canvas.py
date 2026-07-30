@@ -206,6 +206,108 @@ def test_set_measurements_reevaluates_hover_at_last_known_mouse_position(qtbot):
     assert received[0]["label"] == "obj1"
 
 
+def test_multi_mode_drawing_new_roi_appends_and_emits(qtbot):
+    canvas = _setup(qtbot, size=(100, 100), widget_size=(200, 200))  # scale=2
+    canvas.set_multi_mode(True)
+
+    received = []
+    canvas.rois_changed.connect(lambda rois: received.append(rois))
+
+    qtbot.mousePress(canvas, Qt.MouseButton.LeftButton, pos=QPoint(20, 20))
+    qtbot.mouseMove(canvas, QPoint(60, 80))
+    qtbot.mouseRelease(canvas, Qt.MouseButton.LeftButton, pos=QPoint(60, 80))
+
+    assert received == [[(10, 10, 20, 30)]]
+
+
+def test_multi_mode_second_roi_appends_without_removing_first(qtbot):
+    canvas = _setup(qtbot, size=(100, 100), widget_size=(200, 200))
+    canvas.set_multi_mode(True)
+    canvas.set_rois([(10, 10, 20, 20)])
+
+    received = []
+    canvas.rois_changed.connect(lambda rois: received.append(rois))
+
+    # ilk ROI'nin dışında boş bir alana çiz -> ikinci ROI olarak eklenmeli
+    qtbot.mousePress(canvas, Qt.MouseButton.LeftButton, pos=QPoint(120, 120))
+    qtbot.mouseMove(canvas, QPoint(160, 160))
+    qtbot.mouseRelease(canvas, Qt.MouseButton.LeftButton, pos=QPoint(160, 160))
+
+    assert received[-1] == [(10, 10, 20, 20), (60, 60, 20, 20)]
+
+
+def test_multi_mode_moving_existing_roi_by_dragging_inside(qtbot):
+    canvas = _setup(qtbot, size=(100, 100), widget_size=(200, 200))
+    canvas.set_multi_mode(True)
+    canvas.set_rois([(10, 10, 20, 20)])  # widget rect = (20,20,40,40)
+
+    received = []
+    canvas.rois_changed.connect(lambda rois: received.append(rois))
+
+    qtbot.mousePress(canvas, Qt.MouseButton.LeftButton, pos=QPoint(30, 30))  # roi içinde
+    qtbot.mouseMove(canvas, QPoint(50, 50))  # +20,+20 widget -> +10,+10 görüntü
+    qtbot.mouseRelease(canvas, Qt.MouseButton.LeftButton, pos=QPoint(50, 50))
+
+    assert received[-1] == [(20, 20, 20, 20)]
+
+
+def test_multi_mode_resize_via_handle(qtbot):
+    canvas = _setup(qtbot, size=(100, 100), widget_size=(200, 200))
+    canvas.set_multi_mode(True)
+    canvas.set_rois([(10, 10, 20, 20)])  # widget rect = (20,20)-(60,60)
+
+    received = []
+    canvas.rois_changed.connect(lambda rois: received.append(rois))
+
+    qtbot.mousePress(canvas, Qt.MouseButton.LeftButton, pos=QPoint(60, 60))  # br handle
+    qtbot.mouseMove(canvas, QPoint(80, 80))
+    qtbot.mouseRelease(canvas, Qt.MouseButton.LeftButton, pos=QPoint(80, 80))
+
+    assert received[-1] == [(10, 10, 30, 30)]
+
+
+def test_multi_mode_right_click_deletes_roi(qtbot):
+    canvas = _setup(qtbot, size=(100, 100), widget_size=(200, 200))
+    canvas.set_multi_mode(True)
+    canvas.set_rois([(10, 10, 20, 20), (50, 50, 10, 10)])  # widget: (20,20,40,40) / (100,100,20,20)
+
+    received = []
+    canvas.rois_changed.connect(lambda rois: received.append(rois))
+
+    qtbot.mouseClick(canvas, Qt.MouseButton.RightButton, pos=QPoint(30, 30))  # ilk roi içinde
+
+    assert received == [[(50, 50, 10, 10)]]
+
+
+def test_multi_mode_tiny_click_does_not_create_roi(qtbot):
+    canvas = _setup(qtbot, size=(100, 100), widget_size=(200, 200))
+    canvas.set_multi_mode(True)
+
+    received = []
+    canvas.rois_changed.connect(lambda rois: received.append(rois))
+
+    qtbot.mousePress(canvas, Qt.MouseButton.LeftButton, pos=QPoint(20, 20))
+    qtbot.mouseMove(canvas, QPoint(21, 21))  # widget'ta 1px -> görüntüde 0-1px, min boyutun altında
+    qtbot.mouseRelease(canvas, Qt.MouseButton.LeftButton, pos=QPoint(21, 21))
+
+    assert received == [[]]
+
+
+def test_editing_disabled_ignores_mouse_in_multi_mode(qtbot):
+    canvas = _setup(qtbot, size=(100, 100), widget_size=(200, 200))
+    canvas.set_multi_mode(True)
+    canvas.set_editing_enabled(False)
+
+    received = []
+    canvas.rois_changed.connect(lambda rois: received.append(rois))
+
+    qtbot.mousePress(canvas, Qt.MouseButton.LeftButton, pos=QPoint(20, 20))
+    qtbot.mouseMove(canvas, QPoint(60, 80))
+    qtbot.mouseRelease(canvas, Qt.MouseButton.LeftButton, pos=QPoint(60, 80))
+
+    assert received == []
+
+
 def test_editing_disabled_ignores_mouse_for_circle(qtbot):
     canvas = _setup(qtbot, size=(100, 100), widget_size=(200, 200))
     canvas.set_shape("CIRCLE")
@@ -219,3 +321,115 @@ def test_editing_disabled_ignores_mouse_for_circle(qtbot):
     qtbot.mouseRelease(canvas, Qt.MouseButton.LeftButton, pos=QPoint(70, 40))
 
     assert received == []
+
+
+def test_polygon_mode_clicks_add_points_in_image_coordinates(qtbot):
+    canvas = _setup(qtbot, size=(100, 100), widget_size=(200, 200))  # scale=2
+    canvas.set_shape("POLYGON")
+
+    qtbot.mouseClick(canvas, Qt.MouseButton.LeftButton, pos=QPoint(20, 20))
+    qtbot.mouseClick(canvas, Qt.MouseButton.LeftButton, pos=QPoint(80, 20))
+    qtbot.mouseClick(canvas, Qt.MouseButton.LeftButton, pos=QPoint(60, 80))
+
+    assert canvas.polygon_points() == [(10, 10), (40, 10), (30, 40)]
+    assert not canvas.is_polygon_closed()
+
+
+def test_polygon_right_click_undoes_last_point_before_closing(qtbot):
+    canvas = _setup(qtbot, size=(100, 100), widget_size=(200, 200))
+    canvas.set_shape("POLYGON")
+
+    qtbot.mouseClick(canvas, Qt.MouseButton.LeftButton, pos=QPoint(20, 20))
+    qtbot.mouseClick(canvas, Qt.MouseButton.LeftButton, pos=QPoint(80, 20))
+    qtbot.mouseClick(canvas, Qt.MouseButton.RightButton, pos=QPoint(60, 80))
+
+    assert canvas.polygon_points() == [(10, 10)]
+
+
+def test_close_polygon_requires_at_least_three_points(qtbot):
+    """`polygon_changed` her nokta eklendiğinde de yayınlanır (bkz. `_mouse_press_polygon`) --
+    dialog'daki 'Poligonu Kapat' butonunun `setEnabled` durumu SADECE bu sinyalle güncellendiği
+    için, sinyal nokta eklerken de ateşlenmezse buton hiçbir zaman etkinleşmiyordu (gerçek
+    kullanıcı raporu: "en az 3 nokta çizmeme rağmen ... noktalar birleşmiyor")."""
+    canvas = _setup(qtbot, size=(100, 100), widget_size=(200, 200))
+    canvas.set_shape("POLYGON")
+
+    received = []
+    canvas.polygon_changed.connect(lambda pts: received.append(pts))
+
+    qtbot.mouseClick(canvas, Qt.MouseButton.LeftButton, pos=QPoint(20, 20))
+    qtbot.mouseClick(canvas, Qt.MouseButton.LeftButton, pos=QPoint(80, 20))
+    assert received == [[(10, 10)], [(10, 10), (40, 10)]]
+    canvas.close_polygon()
+    assert not canvas.is_polygon_closed()
+    assert received == [[(10, 10)], [(10, 10), (40, 10)]]  # close_polygon() no-ops, no extra emit
+
+    qtbot.mouseClick(canvas, Qt.MouseButton.LeftButton, pos=QPoint(60, 80))
+    canvas.close_polygon()
+    assert canvas.is_polygon_closed()
+    assert received[-1] == [(10, 10), (40, 10), (30, 40)]
+
+
+def test_dragging_vertex_after_closing_moves_it_and_emits(qtbot):
+    canvas = _setup(qtbot, size=(100, 100), widget_size=(200, 200))
+    canvas.set_shape("POLYGON")
+    qtbot.mouseClick(canvas, Qt.MouseButton.LeftButton, pos=QPoint(20, 20))
+    qtbot.mouseClick(canvas, Qt.MouseButton.LeftButton, pos=QPoint(80, 20))
+    qtbot.mouseClick(canvas, Qt.MouseButton.LeftButton, pos=QPoint(60, 80))
+    canvas.close_polygon()
+
+    received = []
+    canvas.polygon_changed.connect(lambda pts: received.append(pts))
+
+    qtbot.mousePress(canvas, Qt.MouseButton.LeftButton, pos=QPoint(20, 20))  # ilk köşe
+    qtbot.mouseMove(canvas, QPoint(40, 40))
+    qtbot.mouseRelease(canvas, Qt.MouseButton.LeftButton, pos=QPoint(40, 40))
+
+    assert canvas.polygon_points() == [(20, 20), (40, 10), (30, 40)]
+    assert received == [[(20, 20), (40, 10), (30, 40)]]
+
+
+def test_clear_polygon_resets_state(qtbot):
+    canvas = _setup(qtbot, size=(100, 100), widget_size=(200, 200))
+    canvas.set_shape("POLYGON")
+    qtbot.mouseClick(canvas, Qt.MouseButton.LeftButton, pos=QPoint(20, 20))
+    qtbot.mouseClick(canvas, Qt.MouseButton.LeftButton, pos=QPoint(80, 20))
+    qtbot.mouseClick(canvas, Qt.MouseButton.LeftButton, pos=QPoint(60, 80))
+    canvas.close_polygon()
+
+    canvas.clear_polygon()
+
+    assert canvas.polygon_points() == []
+    assert not canvas.is_polygon_closed()
+
+
+def test_editing_disabled_ignores_mouse_for_polygon(qtbot):
+    canvas = _setup(qtbot, size=(100, 100), widget_size=(200, 200))
+    canvas.set_shape("POLYGON")
+    canvas.set_editing_enabled(False)
+
+    qtbot.mouseClick(canvas, Qt.MouseButton.LeftButton, pos=QPoint(20, 20))
+
+    assert canvas.polygon_points() == []
+
+
+def test_contour_preview_paints_without_error_and_can_be_cleared(qtbot):
+    canvas = _setup(qtbot, size=(100, 100), widget_size=(200, 200))
+    canvas.show()
+    mask = np.zeros((100, 100), dtype=bool)
+    mask[10:20, 10:20] = True
+
+    canvas.set_contour_preview(mask)
+    canvas.repaint()  # gerçek bir paintEvent tetikler -- QImage kurulumunda hata olursa patlar
+
+    canvas.set_contour_preview(None)
+    canvas.repaint()
+
+
+def test_contour_preview_ignored_in_circle_mode_without_crashing(qtbot):
+    canvas = _setup(qtbot, size=(100, 100), widget_size=(200, 200))
+    canvas.set_shape("CIRCLE")
+    canvas.show()
+
+    canvas.set_contour_preview(np.ones((100, 100), dtype=bool))
+    canvas.repaint()

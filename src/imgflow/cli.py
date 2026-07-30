@@ -5,6 +5,15 @@ from __future__ import annotations
 import sys
 import time
 import traceback
+from pathlib import Path
+
+_APP_NAME = "EK"
+_ICON_DIR = Path(__file__).resolve().parent / "resources" / "icons"
+_ICON_ICO_PATH = _ICON_DIR / "ek_icon.ico"
+_LOGO_PNG_PATH = _ICON_DIR / "ek_logo.png"
+_SPLASH_DISPLAY_SIZE = 320
+"""Splash ekranında gösterilecek kare boyut (px) -- kaynak logo 1024x1024 (görev çubuğu/ikon
+kalitesi için), splash'ta o boyutta göstermek ekranı kaplardı."""
 
 _REPEAT_SUPPRESS_WINDOW_S = 5.0
 """Bir kamera/timer tick'i gibi tekrarlayan bir yol AYNI istisnayı arka arkaya fırlatırsa,
@@ -28,6 +37,11 @@ def _install_excepthook() -> None:
 
     def _handle(exc_type, exc_value, exc_tb) -> None:
         traceback.print_exception(exc_type, exc_value, exc_tb)
+
+        from imgflow.io_utils.app_log import get_logger
+
+        get_logger().error("Yakalanmamış istisna", exc_info=(exc_type, exc_value, exc_tb))
+
         key = (exc_type, str(exc_value))
         now = time.monotonic()
         if now - _last_shown.get(key, -_REPEAT_SUPPRESS_WINDOW_S) < _REPEAT_SUPPRESS_WINDOW_S:
@@ -41,14 +55,51 @@ def _install_excepthook() -> None:
     sys.excepthook = _handle
 
 
+def _apply_app_identity(app) -> None:
+    """Uygulamaya görünür bir kimlik (isim + ikon) kazandırır -- gerçek kullanıcı isteği:
+    masaüstünde/pencere başlığında/görev çubuğunda "EK" adı ve sade bir logo görünsün (bkz.
+    `packaging/generate_icon.py`'nin ürettiği `resources/icons/ek_icon.ico`)."""
+    from PySide6.QtGui import QIcon
+
+    app.setApplicationName(_APP_NAME)
+
+    if sys.platform == "win32":
+        # Windows, bir Python sürecinin görev çubuğu simgesini VARSAYILAN olarak python.exe'nin
+        # kendi ikonuna göre grupluyor -- `setWindowIcon` TEK BAŞINA görev çubuğundaki simgeyi
+        # değiştirmez, süreç önce kendi "Application User Model ID"sini bildirmelidir (iyi
+        # bilinen bir PySide/Windows gotcha'sı). Herhangi bir pencere oluşturulmadan ÖNCE
+        # çağrılmalı.
+        try:
+            import ctypes
+
+            ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(f"imgflow.{_APP_NAME}")
+        except (AttributeError, OSError):
+            pass  # kozmetik bir iyileştirme -- başarısız olursa uygulamayı engellememeli
+
+    if _ICON_ICO_PATH.is_file():
+        app.setWindowIcon(QIcon(str(_ICON_ICO_PATH)))
+
+
 def main() -> int:
-    from PySide6.QtWidgets import QApplication, QMessageBox
+    from PySide6.QtGui import QPixmap
+    from PySide6.QtWidgets import QApplication, QMessageBox, QSplashScreen
 
     from imgflow.core.custom_filters import load_all_custom_filters
+    from imgflow.io_utils.app_log import get_logger, setup_logging
     from imgflow.ui.main_window import MainWindow
 
+    setup_logging()
     _install_excepthook()
     app = QApplication(sys.argv)
+    _apply_app_identity(app)
+
+    splash: QSplashScreen | None = None
+    if _LOGO_PNG_PATH.is_file():
+        pixmap = QPixmap(str(_LOGO_PNG_PATH)).scaled(_SPLASH_DISPLAY_SIZE, _SPLASH_DISPLAY_SIZE)
+        splash = QSplashScreen(pixmap)
+        splash.show()
+        app.processEvents()  # splash'ı hemen boya -- aşağıdaki başlatma işi bitene kadar bekleme
+
     # Disk taramasını burada (uygulama başlangıcında) yapıyoruz, MainWindow.__init__ içinde
     # DEĞİL — MainWindow test paketinde defalarca örneklenir, her seferinde gerçek
     # ~/.imgflow/custom_filters dizinini taramak testleri kullanıcının makine durumuna
@@ -57,9 +108,15 @@ def main() -> int:
     window = MainWindow()
     window.resize(1000, 700)
     window.capture_gallery_panel.refresh()  # aynı sebeple burada: bkz. CaptureGalleryPanel docstring'i
-    window.show()
+    # Gerçek kullanıcı raporu: "uygulama kendi kendine tam ekrandan çıkıyor ... tam ekrandan
+    # hiç çıkmasın" -- uygulama artık BÜYÜTÜLMÜŞ (maximized) başlıyor, `MainWindow.changeEvent`
+    # de bunu daraltılmaya karşı kilitliyor (bkz. o metodun docstring'i).
+    window.showMaximized()
+    if splash is not None:
+        splash.finish(window)
     if failures:
         names = ", ".join(defn.name for defn, _exc in failures)
+        get_logger().warning("Bazı özel filtreler yüklenemedi: %s", names)
         QMessageBox.warning(
             window,
             "Bazı Özel Filtreler Yüklenemedi",

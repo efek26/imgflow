@@ -6,11 +6,11 @@
 tarafından taşınır/silinirse referans kırılmasın), yanına küçük bir `<slug>.json` metadata
 sidecar'ı yazılır.
 
-`task_type` alanı şu an sadece `"yolo"` için FONKSİYONEL (bkz. `core/onnx_detection.py`);
-`"classification"`/`"segmentation"` de KAYDEDİLEBİLİR (gelecek fazlar için yer tutucu,
-Araçlar > ONNX Model Kaydet... diyaloğunda "(yakında)" etiketiyle listelenir) ama
-`ml.onnx_detect` operatörü bu türler için çalıştırıldığında net bir "henüz desteklenmiyor"
-hatası verir.
+`task_type` üç değerden biri olabilir, ÜÇÜ de `ml.onnx_detect` operatöründe FONKSİYONEL
+(bkz. `core/onnx_detection.py::find_objects_yolo`/`classify_image`/`segment_image`):
+`"yolo"` (nesne tespiti, kutu), `"classification"` (tüm-görüntü sınıflandırma/anomali,
+kutu YOK), `"segmentation"` (semantik/piksel-başına segmentasyon, `class_id=0` arka plan
+varsayılır).
 
 **Testler `ONNX_MODEL_DIR`'ı `monkeypatch` ile `tmp_path`'e yönlendirmeli** — aksi halde
 gerçek ev dizinine dosya sızar. `directory` parametresi ÖNTANIMLI olarak `None`dır ve

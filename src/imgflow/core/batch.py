@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import csv
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from imgflow.core.engine import ExecutionEngine
 from imgflow.core.graph import Graph
@@ -42,25 +42,38 @@ def run_batch(
     source_node_id: str | None = None,
     source_op_id: str = "io.image_source",
     registry: Any = None,
+    progress_callback: Callable[[int, int], None] | None = None,
+    should_cancel: Callable[[], bool] | None = None,
 ) -> list[dict[str, Any]]:
+    """`progress_callback(işlenen, toplam)` her resimden SONRA çağrılır; `should_cancel()`
+    her resimden ÖNCE kontrol edilir, `True` dönerse döngü erken `break` eder — o ana kadar
+    biriken `rows` yine CSV'ye yazılıp döner (mevcut "bir resmin hatası tüm batch'i
+    durdurmaz" felsefesiyle tutarlı KISMİ tamamlanma). İkisi de varsayılan `None` olduğu
+    için mevcut çağrılar davranış değişikliği olmadan çalışmaya devam eder."""
     source_node_id = source_node_id or _find_source_node(graph, source_op_id)
     engine = ExecutionEngine(graph, registry=registry)
 
+    images = iter_images(input_folder)
+    total = len(images)
     rows: list[dict[str, Any]] = []
-    for image_path in iter_images(input_folder):
+    for index, image_path in enumerate(images, start=1):
+        if should_cancel is not None and should_cancel():
+            break
         graph.nodes[source_node_id].params["path"] = str(image_path)
         engine.mark_dirty(source_node_id)
         result = engine.evaluate(target_node_id)
 
         if not result.ok:
             rows.append({"image": image_path.name, "error": str(result.error)})
-            continue
+        else:
+            measurements = (result.outputs or {}).get("measurements")
+            if not measurements:
+                rows.append({"image": image_path.name})
+            else:
+                rows.extend({"image": image_path.name, **measurement} for measurement in measurements)
 
-        measurements = (result.outputs or {}).get("measurements")
-        if not measurements:
-            rows.append({"image": image_path.name})
-            continue
-        rows.extend({"image": image_path.name, **measurement} for measurement in measurements)
+        if progress_callback is not None:
+            progress_callback(index, total)
 
     _write_csv(output_csv, rows)
     return rows

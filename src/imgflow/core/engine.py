@@ -3,6 +3,7 @@ alt-graf yeniden hesaplanır, geri kalanı cache'ten döner."""
 
 from __future__ import annotations
 
+import time
 from collections import deque
 from dataclasses import dataclass
 from typing import Any
@@ -36,6 +37,14 @@ class ExecutionEngine:
         self._registry = registry
         self._cache: dict[str, NodeResult] = {}
         self._dirty: set[str] = set(graph.nodes)
+        self._durations: dict[str, float] = {}
+        """node_id -> son GERÇEK çalıştırmasının süresi (saniye). Sadece `evaluate()`'in
+        fiilen `op_cls().run(...)` çağırdığı durumda yazılır -- cache-hit (satır ~92) ya da
+        üst akış hatası nedeniyle atlanan node'lar için YAZILMAZ (0 ya da eski bir değer
+        göstermek yerine, o node bu turda hiç çalışmadıysa `durations` sözlüğünde hiç
+        YOKTUR). Gerçek kullanıcı isteği: "her işlemin sonucunun süresi sonuçlar kısmında
+        yazmalı" -- `ui/main_window.py::_build_preview_frame` bunu okuyup pipeline sırasıyla
+        bir tabloya döker."""
 
     @property
     def registry(self):
@@ -106,17 +115,24 @@ class ExecutionEngine:
                 continue
 
             node = self.graph.nodes[nid]
+            start = time.perf_counter()
             try:
                 op_cls = self.registry.get(node.op_id)
                 inputs = self._gather_inputs(nid, op_cls)
                 outputs = op_cls().run(inputs, node.params)
                 self._cache[nid] = NodeResult(outputs=_freeze(outputs))
+                self._durations[nid] = time.perf_counter() - start
             except Exception as exc:  # noqa: BLE001 - bir operatörün patlaması tüm pipeline'ı durdurmamalı
                 self._cache[nid] = NodeResult(
                     outputs=None, error=OperatorRuntimeError(nid, node.op_id, exc)
                 )
             self._dirty.discard(nid)
         return self._cache[target_id]
+
+    @property
+    def durations(self) -> dict[str, float]:
+        """node_id -> saniye. Bkz. `__init__`'teki `_durations` notu."""
+        return dict(self._durations)
 
     def trial_run(self, node_id: str, params_override: dict[str, Any]) -> NodeResult:
         """node_id'yi verilen parametrelerle bir kerelik çalıştırır; cache/dirty durumu etkilenmez.

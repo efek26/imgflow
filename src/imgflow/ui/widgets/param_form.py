@@ -64,6 +64,26 @@ class ParamForm(QWidget):
                 container.setToolTip(spec.help)
             self._layout.addRow(label, container)
 
+        self._sync_combo_autoselection()
+
+    def _sync_combo_autoselection(self) -> None:
+        """Bir `QComboBox`'a `addItems()` çağrılır çağrılmaz Qt ilk öğeyi OTOMATİK seçili
+        gösterir. Saklanan değer boşsa ya da (eski bir reçetedeki kaldırılmış seçenek gibi)
+        listede yoksa, ekranda dolu görünen alan aslında `_values`'ta hâlâ eski/boş değeri
+        tutuyordu -- kullanıcı hiç dokunmasa bile operatör "parametre boş olamaz" hatası
+        vermeye devam ediyordu (gerçek kullanıcı raporu). Burada widget'ın GÖSTERDİĞİ değerle
+        `_values` hizalanır ve fark varsa TEK bir `params_changed` yayınlanır."""
+        corrected = False
+        for name, control in self._widgets.items():
+            if not isinstance(control, QComboBox):
+                continue
+            shown = control.currentText()
+            if self._values.get(name) != shown:
+                self._values[name] = shown
+                corrected = True
+        if corrected:
+            self.params_changed.emit(dict(self._values))
+
     def values(self) -> dict[str, Any]:
         return dict(self._values)
 

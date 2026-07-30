@@ -325,7 +325,11 @@ class OperatorLibrary(QWidget):
                 category_item.addChild(op_item)
                 self._items_by_op_id[op_id] = op_item
         self._suppress_signal = False
-        self.tree.expandAll()
+        # Gerçek kullanıcı isteği: "sol taraftaki operatör kütüphanesi alt başlıkları
+        # gözükecek şekilde açık olmasın, ana başlıklar olsun, alt başlıklar tıklayınca
+        # açılsın" -- kategoriler KAPALI başlar, arama kutusu geçici olarak açar
+        # (bkz. `_apply_filter`).
+        self.tree.collapseAll()
 
     def set_checked(self, op_id: str, checked: bool) -> None:
         item = self._items_by_op_id.get(op_id)
@@ -347,6 +351,9 @@ class OperatorLibrary(QWidget):
                 child.setHidden(not match)
                 visible_children += match
             category_item.setHidden(visible_children == 0)
+            # Arama yapılırken EŞLEŞEN kategoriler açılır (sonuçlar tek tıkla görünsün),
+            # kutu temizlenince hepsi tekrar kapanır -- kapalı başlangıç durumuna dönülür.
+            category_item.setExpanded(bool(needle) and visible_children > 0)
 
     def _on_item_changed(self, item: QTreeWidgetItem, column: int) -> None:
         if self._suppress_signal or column != 0:

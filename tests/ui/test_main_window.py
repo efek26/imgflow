@@ -1,3 +1,5 @@
+import copy
+
 import cv2
 import numpy as np
 import pytest
@@ -5,6 +7,8 @@ import pytest
 from imgflow.core.camera_source import BaslerCameraSource
 from imgflow.core.errors import ImgflowError
 from imgflow.core.params import ParamType
+from imgflow.io_utils import flatfield_store
+from imgflow.ui import main_window as main_window_module
 from imgflow.ui.main_window import MainWindow
 from tests.support.fake_genicam import FakeGenicamNode, FakeNodeMap, default_camera_nodes
 
@@ -15,6 +19,41 @@ def _sample_image_path(tmp_path):
     path = tmp_path / "sample.png"
     cv2.imwrite(str(path), img)
     return path
+
+
+def _run_camera_tick_and_wait(window, qtbot, timeout=2000):
+    """`_on_camera_tick`'in ağır kısmı (`_build_preview_frame`) artık `_LiveTickWorker`'da
+    ARKA PLANDA çalışıyor (bkz. gerçek kullanıcı raporu: "şekil bul çok kasıyor ve kamerayı
+    siyah-beyaza çeviriyor" -- kök neden UI thread'in tamamen bloklanmasıydı). `image_view`/
+    `results_panel` gibi widget'ların dispatch edilen sonucu YANSITMASINI bekleyen testler
+    doğrudan `window._on_camera_tick()` çağırmak yerine bunu kullanmalı -- aksi halde worker
+    henüz sonucu teslim etmeden assert çalışır. Kamera/tick'e bağımlı olmayan (senkron
+    `_maybe_apply_auto_mm_per_px`/`inject_result`/enum galerisi gibi) durumları kontrol eden
+    testler bu yardımcıya ihtiyaç DUYMAZ."""
+    window._on_camera_tick()
+    qtbot.waitUntil(lambda: not window._live_worker_busy, timeout=timeout)
+
+
+def _get_normal_base_image_for(window):
+    return main_window_module._get_normal_base_image(
+        window.graph, window.engine, window.registry, window._camera_source is not None, window._last_camera_frame
+    )
+
+
+def _compose_display_image_for(window, filtered_image, measurements, mm_per_px, node_id=None):
+    return main_window_module._compose_display_image(
+        filtered_image,
+        measurements,
+        mm_per_px,
+        node_id,
+        view_mode=window._view_mode,
+        graph=window.graph,
+        pipeline_order=window.pipeline.order,
+        engine=window.engine,
+        registry=window.registry,
+        camera_active=window._camera_source is not None,
+        last_camera_frame=window._last_camera_frame,
+    )
 
 
 class _FakeCameraSource:
@@ -281,20 +320,76 @@ def test_open_measurement_tool_without_calibration_shows_no_mm(qtbot):
     window._measurement_tool_dialog.close()
 
 
-def test_height_scale_action_enabled_for_any_camera_and_opens_dialog(qtbot):
+def test_reopening_measurement_tool_does_not_leak_previous_dialog(qtbot):
+    """Regresyon: `_on_open_measurement_tool` her çağrıda TAZE bir dialog kurar (tekil-dialog
+    yeniden kullanım desenindeki gibi eskiyi `show()`la geri getirmez) -- eski `close()` C++
+    nesnesini `WA_DeleteOnClose` olmadan yok ETMEDİĞİNDEN `deleteLater()` çağrılmazsa her
+    yeniden açılış görüntü verisiyle birlikte bir dialog'u sonsuza kadar bellekte bırakırdı
+    (tekrarlı aç/kapa stres testiyle doğrulandı)."""
+    import shiboken6
+
     window = MainWindow()
     qtbot.addWidget(window)
 
-    assert window._height_scale_action.isEnabled() is False
+    window._on_open_measurement_tool()
+    first_dialog = window._measurement_tool_dialog
+    assert first_dialog is not None
 
-    window.start_camera(_FakeCameraSource([]))
+    window._on_open_measurement_tool()
+    qtbot.wait(10)
+
+    assert window._measurement_tool_dialog is not first_dialog
+    assert not shiboken6.isValid(first_dialog)
+    window._measurement_tool_dialog.close()
+
+
+def test_capture_photo_stays_usable_while_measurement_tool_is_open(qtbot, tmp_path, monkeypatch):
+    """Kullanıcının, başka bir asistanın kod okumadan yaptığı (doğrulanmamış) analizini relay
+    ettiği istek: "ölçüm varken Kare Yakala kullanabilme". `MeasurementToolDialog` non-modal
+    ve MainWindow'un `parent`'ı olarak açılıyor -- `_capture_photo_action`/`_capture_photo_
+    button`'ın etkin/devre dışı durumu SADECE `start_camera`/`stop_camera`'ya bağlı (bkz.
+    `_on_capture_camera_photo`), Ölçüm Aracı dialog'unun açık olup olmamasına HİÇ bakılmıyor
+    -- bu test bunu, dialog AÇIKKEN gerçek bir yakalama yapıp doğrulayarak kanıtlıyor (kod
+    okumadan "kavramsal olarak engelleyici bir neden yok" varsayımının GERÇEKTEN doğru
+    olduğunu gösteren regresyon testi)."""
+    from imgflow.core import capture_store
+
+    monkeypatch.setattr(capture_store, "CAPTURE_DIR", tmp_path / "captures")
+
+    window = MainWindow()
+    qtbot.addWidget(window)
+    window.start_camera(_FakeCameraSource([np.full((10, 10, 3), 200, dtype=np.uint8)]))
+    window._on_camera_tick()
+
+    window._on_open_measurement_tool()
+    assert window._measurement_tool_dialog is not None
+    assert window._measurement_tool_dialog.isVisible()
+
+    assert window._capture_photo_action.isEnabled() is True
+    assert window._capture_photo_button.isEnabled() is True
+    window._on_capture_camera_photo()
+
+    assert len(capture_store.list_captures()) == 1
+    assert "kaydedildi" in window.status_label.text()
+    window._measurement_tool_dialog.close()
+
+
+def test_height_scale_action_enabled_without_camera_and_opens_dialog(qtbot):
+    """Gerçek kullanıcı isteği: "yaptığımız kalibrasyonu canlı görüntü olmadan da
+    kullanabilmeliyim" -- bu aksiyon artık kamera HİÇ açılmadan da kullanılabilir/etkin."""
+    window = MainWindow()
+    qtbot.addWidget(window)
+
     assert window._height_scale_action.isEnabled() is True
 
     window._on_open_height_scale_calibration()
     assert window._height_scale_dialog is not None
 
+    window.start_camera(_FakeCameraSource([]))
+    assert window._height_scale_action.isEnabled() is True
+
     window.stop_camera()
-    assert window._height_scale_action.isEnabled() is False
+    assert window._height_scale_action.isEnabled() is True
     assert window._height_scale_dialog is None
 
 
@@ -315,15 +410,36 @@ def test_height_scale_model_updated_signal_sets_active_model(qtbot):
     assert window._height_scale_model is model
 
 
-def test_lens_calibration_action_enabled_for_any_camera(qtbot):
+def test_lens_calibration_action_enabled_without_camera(qtbot):
+    """Gerçek kullanıcı isteği: "yaptığımız kalibrasyonu canlı görüntü olmadan da
+    kullanabilmeliyim" -- bu aksiyon artık kamera hiç açılmadan da etkin."""
     window = MainWindow()
     qtbot.addWidget(window)
+
+    assert window._lens_calibration_action.isEnabled() is True
 
     window.start_camera(_FakeCameraSource([]))
     assert window._lens_calibration_action.isEnabled() is True
 
     window.stop_camera()
-    assert window._lens_calibration_action.isEnabled() is False
+    assert window._lens_calibration_action.isEnabled() is True
+
+
+def test_lens_calibration_opens_without_camera_and_frame_provider_returns_none(qtbot):
+    window = MainWindow()
+    qtbot.addWidget(window)
+
+    window._on_open_lens_calibration()
+
+    assert window._lens_calibration_dialog is not None
+    assert window._camera_frame_provider() is None
+
+
+def test_load_calibration_profile_action_enabled_without_camera(qtbot):
+    window = MainWindow()
+    qtbot.addWidget(window)
+
+    assert window._load_calibration_profile_action.isEnabled() is True
 
 
 def test_open_help_creates_and_shows_dialog(qtbot):
@@ -471,6 +587,102 @@ def test_camera_tick_read_failure_does_not_crash_or_show_modal(qtbot, monkeypatc
     assert "Kare okunamadı" in window.status_label.text()
 
 
+def test_camera_tick_auto_reconnects_after_sustained_failure(qtbot, monkeypatch):
+    """Kablo çekilip tekrar takıldığı senaryosu: `_camera_reconnect_factory` set edilmiş bir
+    kaynak art arda `_CAMERA_DISCONNECT_THRESHOLD_TICKS` kadar başarısız olursa, factory
+    tekrar çağrılıp `start_camera` ile YENİ bir kaynağa otomatik geçilmeli — hiçbir modal
+    gösterilmeden (bkz. `_register_camera_failure` docstring'i)."""
+
+    class _FailingThenRecoveringSource:
+        def __init__(self):
+            self.released = False
+
+        def read(self):
+            raise RuntimeError("kablo koptu")
+
+        def release(self):
+            self.released = True
+
+    recovered_source = _FakeCameraSource([np.zeros((10, 10, 3), dtype=np.uint8)])
+    window = MainWindow()
+    qtbot.addWidget(window)
+    failing_source = _FailingThenRecoveringSource()
+    window.start_camera(failing_source)
+    window._camera_reconnect_factory = lambda: recovered_source
+
+    calls = []
+    monkeypatch.setattr("PySide6.QtWidgets.QMessageBox.critical", lambda *a, **k: calls.append(1))
+
+    for _ in range(main_window_module._CAMERA_DISCONNECT_THRESHOLD_TICKS):
+        window._on_camera_tick()
+
+    assert calls == []
+    assert window._camera_source is recovered_source
+    assert failing_source.released is True
+    assert "yeniden bağlandı" in window.status_label.text()
+
+
+def test_camera_tick_does_not_reconnect_on_normal_basler_trigger_wait(qtbot):
+    """Basler/GigE tetikleyici modda `read()`'in `None` dönmesi normaldir ("henüz tetiklenmedi")
+    — bağlantı kopması DEĞİLDİR. Bu regresyon testi, sürekli `None` dönen bir Basler kaynağının
+    YANLIŞLIKLA kopmuş sayılıp reconnect factory'i tetiklemediğini doğrular."""
+    node_map = FakeNodeMap(default_camera_nodes())
+    window = MainWindow()
+    qtbot.addWidget(window)
+    source = _FakeBaslerCameraSource(node_map)
+    window.start_camera(source)
+
+    factory_calls = []
+    window._camera_reconnect_factory = lambda: factory_calls.append(1)
+
+    for _ in range(main_window_module._CAMERA_DISCONNECT_THRESHOLD_TICKS * 2):
+        window._on_camera_tick()
+
+    assert factory_calls == []
+    assert window._camera_source is source
+
+
+def test_stop_camera_action_clears_reconnect_factory(qtbot):
+    """Kullanıcı elle 'Kamerayı Durdur' derse otomatik yeniden bağlanma da tamamen
+    devre dışı kalmalı — aksi halde durdurulmuş bir kamera arka planda kendini yeniden
+    başlatmaya çalışırdı."""
+    window = MainWindow()
+    qtbot.addWidget(window)
+    window.start_camera(_FakeCameraSource([]))
+    window._camera_reconnect_factory = lambda: _FakeCameraSource([])
+
+    window._on_stop_camera()
+
+    assert window._camera_reconnect_factory is None
+    assert window._camera_fail_streak == 0
+    assert window._camera_reconnect_cooldown_ticks == 0
+
+
+def test_camera_tick_throttles_enum_gallery_refresh(qtbot, monkeypatch):
+    """Seçili adımda bir enum parametre varsa (`segment.threshold`'un 'mode'u), galerinin her
+    seçeneği tam bir operatör çalıştırması gerektirir — bunu HER kamera tick'inde (100ms)
+    çalıştırmak gereksiz CPU harcar. `_ENUM_GALLERY_TICK_STRIDE` kadar tick'te SADECE İLK
+    tick'te yenilenmeli, `_ENUM_GALLERY_TICK_STRIDE + 1`. tick'te ikinci kez."""
+    window = MainWindow()
+    qtbot.addWidget(window)
+    # `io.image_source` ÖNCEDEN eklenir — aksi halde ilk tick'te `_find_or_create_image_source`
+    # onu ekleyip SEÇERDİ, seçimi 'th_id'den çalıp bu testi anlamsız kılardı.
+    window.add_operator("io.image_source")
+    th_id = window.add_operator("segment.threshold")
+    window._on_step_selected(th_id)
+    window.start_camera(_FakeCameraSource([np.zeros((10, 10, 3), dtype=np.uint8) for _ in range(10)]))
+
+    calls = []
+    monkeypatch.setattr(window.enum_gallery, "show_choices", lambda *a, **k: calls.append(1))
+
+    for _ in range(main_window_module._ENUM_GALLERY_TICK_STRIDE):
+        window._on_camera_tick()
+    assert len(calls) == 1
+
+    window._on_camera_tick()
+    assert len(calls) == 2
+
+
 def test_camera_tick_applies_undistort_when_lens_profile_set(qtbot, monkeypatch):
     window = MainWindow()
     qtbot.addWidget(window)
@@ -577,13 +789,101 @@ def test_start_camera_without_prior_settings_shows_plain_status(qtbot, tmp_path)
     assert "önceki ayarlar" not in window.camera_settings_panel._status_label.text()
 
 
+def test_camera_tick_drops_frame_while_worker_busy_but_still_updates_last_frame(qtbot):
+    """Gerçek kullanıcı raporu: "şekil bul özelliği çok kasıyor" -- bir önceki tick'in ağır
+    hesaplaması (burada yavaş bir sahte operatörle simüle edilir) hâlâ arka planda sürüyorken
+    yeni bir tick gelirse, bu karenin İŞLENMESİ atlanır (yeni bir worker dispatch edilmez,
+    `_live_tick_generation` İLERLEMEZ) -- ama `_last_camera_frame` yine de güncellenir
+    (Fotoğraf Çek gibi özellikler her zaman en taze kareyi görsün diye)."""
+    import time
+
+    from imgflow.core.types import PortSpec, PortType
+    from imgflow.operators import registry as op_registry
+
+    class _SlowOp:
+        id = "test.slow_live_tick"
+        inputs = [PortSpec("image", PortType.IMAGE)]
+        outputs = [PortSpec("image", PortType.IMAGE)]
+        params = []
+
+        def run(self, inputs, params):
+            time.sleep(0.3)
+            return {"image": inputs["image"]}
+
+    op_registry.register(_SlowOp)
+    try:
+        window = MainWindow()
+        qtbot.addWidget(window)
+        window.add_operator("io.image_source")
+        slow_id = window.add_operator("test.slow_live_tick")
+        window._on_step_selected(slow_id)
+
+        frame1 = np.zeros((10, 10, 3), dtype=np.uint8)
+        frame2 = np.full((10, 10, 3), 255, dtype=np.uint8)
+        window.start_camera(_FakeCameraSource([frame1, frame2]))
+
+        window._on_camera_tick()  # worker dispatch edilir, yavaş operatör YÜZÜNDEN hâlâ çalışır
+        assert window._live_worker_busy is True
+        generation_after_first_dispatch = window._live_tick_generation
+
+        window._on_camera_tick()  # meşgul -> bu tick'in işlenmesi ATLANMALI
+        assert window._live_tick_generation == generation_after_first_dispatch
+        assert window._last_camera_frame is frame2  # kare yine de güncellendi
+
+        qtbot.waitUntil(lambda: not window._live_worker_busy, timeout=2000)
+    finally:
+        op_registry.unregister("test.slow_live_tick")
+
+
+def test_live_tick_result_with_stale_generation_is_discarded_current_is_applied(qtbot):
+    """`_on_live_tick_result`, dispatch anındaki `generation` o anki `_live_tick_generation`'la
+    UYUŞMUYORSA (seçili adım/görünüm modu bu arada değişti, bkz. `_set_selected_node`/
+    `_on_view_mode_changed`) sonucu sessizce atmalı -- geç gelen bir sonucun ekrana yanlışlıkla
+    yansımasını önler."""
+    window = MainWindow()
+    qtbot.addWidget(window)
+    src_id = window.add_operator("io.image_source")
+    window._on_step_selected(src_id)
+
+    def _make_result(status_text: str) -> "main_window_module.PreviewFrameResult":
+        return main_window_module.PreviewFrameResult(
+            ok=True,
+            error=None,
+            display_image=np.full((5, 5, 3), 111, dtype=np.uint8),
+            hover_measurements=None,
+            measurements=[],
+            status_text=status_text,
+            is_roi_step=False,
+            manual_roi_active=False,
+            roi_shape="RECT",
+            roi_x=0,
+            roi_y=0,
+            roi_w=100,
+            roi_h=100,
+            roi_cx=100,
+            roi_cy=100,
+            roi_r=50,
+            manual_rois=None,
+            step_durations=None,
+        )
+
+    stale_generation = window._live_tick_generation
+    window._set_selected_node(src_id)  # simüle: dispatch SONRASI seçim değişti (generation ilerler)
+
+    window._on_live_tick_result(stale_generation, _make_result("STALE"))
+    assert window.status_label.text() != "STALE"
+
+    window._on_live_tick_result(window._live_tick_generation, _make_result("FRESH"))
+    assert window.status_label.text() == "FRESH"
+
+
 def test_start_camera_injects_frame_and_creates_source_node(qtbot):
     window = MainWindow()
     qtbot.addWidget(window)
     frame = np.full((10, 10, 3), 128, dtype=np.uint8)
 
     window.start_camera(_FakeCameraSource([frame]))
-    window._on_camera_tick()
+    _run_camera_tick_and_wait(window, qtbot)
 
     src_nodes = [n for n in window.graph.nodes.values() if n.op_id == "io.image_source"]
     assert len(src_nodes) == 1
@@ -746,6 +1046,226 @@ def test_unchecking_operator_removes_it_and_syncs_checkbox(qtbot):
     assert item.checkState(0) == Qt.CheckState.Unchecked
 
 
+def test_undo_redo_add_operator(qtbot):
+    window = MainWindow()
+    qtbot.addWidget(window)
+    assert window._undo_action.isEnabled() is False
+
+    node_id = window.add_operator("segment.threshold")
+    assert node_id in window.graph.nodes
+    assert window._undo_action.isEnabled() is True
+
+    window._on_undo()
+    assert node_id not in window.graph.nodes
+    assert window._redo_action.isEnabled() is True
+
+    window._on_redo()
+    assert node_id in window.graph.nodes
+
+
+def test_undo_redo_remove_operator(qtbot):
+    window = MainWindow()
+    qtbot.addWidget(window)
+    node_id = window.add_operator("segment.threshold")
+
+    window.remove_operator(node_id)
+    assert node_id not in window.graph.nodes
+
+    window._on_undo()
+    assert node_id in window.graph.nodes
+    assert window.graph.nodes[node_id].op_id == "segment.threshold"
+
+
+def test_undo_param_change_restores_previous_value(qtbot):
+    window = MainWindow()
+    qtbot.addWidget(window)
+    node_id = window.add_operator("segment.threshold")
+    window._on_step_selected(node_id)
+    original_params = dict(window.graph.nodes[node_id].params)
+    stack_depth_after_add = len(window._undo_stack)
+
+    window.param_form.params_changed.emit({"value": 200, "max_value": 255, "mode": "BINARY"})
+    assert window.graph.nodes[node_id].params["value"] == 200
+    # Debounce henüz tetiklenmedi (bkz. `_PARAM_DEBOUNCE_MS`) — bekleyen snapshot henüz
+    # yığına PUSH edilmedi, ama Geri Al aksiyonu yine de bunu flush edip kullanmalı.
+    assert len(window._undo_stack) == stack_depth_after_add
+
+    window._on_undo()
+
+    assert window.graph.nodes[node_id].params["value"] == original_params["value"]
+
+
+def test_saving_flat_field_reference_autofills_empty_reference_name(qtbot, monkeypatch, tmp_path):
+    # Gerçek kullanıcı raporu: Araçlar > Aydınlatma Referansı Kaydet... ile bir referans
+    # kaydetmek, seçili `correction.flat_field` adımının `reference_name` parametresini
+    # OTOMATİK seçmiyordu -- kullanıcı referansı kaydettiğini/yüklediğini düşünüp filtreyi
+    # uyguluyor ama alan hâlâ boş kaldığı için "'reference_name' parametresi boş olamaz"
+    # hatası alıyordu.
+    monkeypatch.setattr(flatfield_store, "FLATFIELD_DIR", tmp_path / "flatfield")
+    window = MainWindow()
+    qtbot.addWidget(window)
+    node_id = window.add_operator("correction.flat_field")
+    window._on_step_selected(node_id)
+    assert window.graph.nodes[node_id].params.get("reference_name") == ""
+
+    window._on_flat_field_references_changed("hat1_bos_bant")
+
+    assert window.graph.nodes[node_id].params["reference_name"] == "hat1_bos_bant"
+
+
+def test_saving_flat_field_reference_does_not_override_existing_selection(qtbot, monkeypatch, tmp_path):
+    monkeypatch.setattr(flatfield_store, "FLATFIELD_DIR", tmp_path / "flatfield")
+    window = MainWindow()
+    qtbot.addWidget(window)
+    node_id = window.add_operator("correction.flat_field")
+    window._on_step_selected(node_id)
+    window.graph.nodes[node_id].params["reference_name"] = "onceki_referans"
+
+    window._on_flat_field_references_changed("yeni_referans")
+
+    assert window.graph.nodes[node_id].params["reference_name"] == "onceki_referans"
+
+
+def test_deleting_flat_field_reference_does_not_set_reference_name(qtbot, monkeypatch, tmp_path):
+    monkeypatch.setattr(flatfield_store, "FLATFIELD_DIR", tmp_path / "flatfield")
+    window = MainWindow()
+    qtbot.addWidget(window)
+    node_id = window.add_operator("correction.flat_field")
+    window._on_step_selected(node_id)
+
+    window._on_flat_field_references_changed("")  # silme sinyali boş isimle gelir
+
+    assert window.graph.nodes[node_id].params.get("reference_name") == ""
+
+
+def test_selecting_flat_field_step_autofills_reference_name_from_only_saved_reference(
+    qtbot, monkeypatch, tmp_path
+):
+    # Bu, `ParamForm`'daki asıl kök nedenin regresyon testidir: Qt bir QComboBox'a
+    # `addItems()` ile öğe eklendiğinde -- kutu boşken -- otomatik olarak ilk öğeyi seçili
+    # gösterir; bu sinyal bağlantısından ÖNCE olduğu için düğümün gerçek `params`'ı hiç
+    # güncellenmiyordu. Kullanıcı "yan tarafta deneme1 yazmasına rağmen" hâlâ "'reference_name'
+    # parametresi boş olamaz" hatası aldığını bildirdi -- tam olarak bu senaryo.
+    monkeypatch.setattr(flatfield_store, "FLATFIELD_DIR", tmp_path / "flatfield")
+    flatfield_store.save_reference("deneme1", np.full((10, 10), 180, dtype=np.uint8))
+    window = MainWindow()
+    qtbot.addWidget(window)
+    node_id = window.add_operator("correction.flat_field")
+
+    window._on_step_selected(node_id)
+
+    assert window.graph.nodes[node_id].params["reference_name"] == "deneme1"
+
+
+def test_duplicate_step_creates_independent_copy_with_same_params(qtbot):
+    window = MainWindow()
+    qtbot.addWidget(window)
+    node_id = window.add_operator("segment.threshold")
+    window._on_step_selected(node_id)
+    window.param_form.params_changed.emit({"value": 77, "max_value": 255, "mode": "BINARY"})
+    window._flush_pending_params()
+
+    window.steps_panel.select_node(node_id)
+    window._on_duplicate_step_clicked()
+
+    threshold_nodes = [n for n in window.graph.nodes.values() if n.op_id == "segment.threshold"]
+    assert len(threshold_nodes) == 2
+    assert all(n.params["value"] == 77 for n in threshold_nodes)
+    duplicate_id = next(nid for nid, n in window.graph.nodes.items() if n.op_id == "segment.threshold" and nid != node_id)
+    assert window.pipeline.order.index(duplicate_id) == window.pipeline.order.index(node_id) + 1
+
+
+def test_removing_one_duplicate_instance_keeps_library_checkbox_checked(qtbot):
+    """Regresyon: 'adım kopyala' aynı op_id'den ikinci bir örnek yarattığında, ikisinden
+    birini silmek diğeri hâlâ pipeline'dayken operatör kütüphanesi checkbox'ını yanlışlıkla
+    KAPATMAMALI (eskiden koşulsuzdu)."""
+    window = MainWindow()
+    qtbot.addWidget(window)
+    node_id = window.add_operator("segment.threshold")
+    window.steps_panel.select_node(node_id)
+    window._on_duplicate_step_clicked()
+    duplicate_id = next(nid for nid in window.graph.nodes if nid != node_id)
+
+    window.remove_operator(duplicate_id)
+
+    from PySide6.QtCore import Qt as _Qt
+
+    item = window.operator_library._items_by_op_id["segment.threshold"]
+    assert item.checkState(0) == _Qt.CheckState.Checked
+    assert node_id in window.graph.nodes
+
+
+def test_undo_duplicate_step_removes_the_copy(qtbot):
+    window = MainWindow()
+    qtbot.addWidget(window)
+    node_id = window.add_operator("segment.threshold")
+    window.steps_panel.select_node(node_id)
+    window._on_duplicate_step_clicked()
+    assert len(window.graph.nodes) == 2
+
+    window._on_undo()
+
+    assert len(window.graph.nodes) == 1
+    assert node_id in window.graph.nodes
+
+
+def test_move_step_up_and_down_changes_pipeline_order(qtbot):
+    window = MainWindow()
+    qtbot.addWidget(window)
+    first_id = window.add_operator("io.image_source")
+    second_id = window.add_operator("color.grayscale")
+    assert window.pipeline.order == [first_id, second_id]
+
+    window.steps_panel.select_node(second_id)
+    window._on_move_step_up_clicked()
+    assert window.pipeline.order == [second_id, first_id]
+
+    window._on_move_step_down_clicked()
+    assert window.pipeline.order == [first_id, second_id]
+
+
+def test_move_step_up_at_top_is_a_no_op(qtbot):
+    window = MainWindow()
+    qtbot.addWidget(window)
+    first_id = window.add_operator("io.image_source")
+    window.add_operator("color.grayscale")
+    window.steps_panel.select_node(first_id)
+    stack_depth_before = len(window._undo_stack)
+
+    window._on_move_step_up_clicked()
+
+    assert window.pipeline.order[0] == first_id
+    assert len(window._undo_stack) == stack_depth_before
+
+
+def test_undo_move_step_restores_previous_order(qtbot):
+    window = MainWindow()
+    qtbot.addWidget(window)
+    first_id = window.add_operator("io.image_source")
+    second_id = window.add_operator("color.grayscale")
+    window.steps_panel.select_node(second_id)
+    window._on_move_step_up_clicked()
+    assert window.pipeline.order == [second_id, first_id]
+
+    window._on_undo()
+
+    assert window.pipeline.order == [first_id, second_id]
+
+
+def test_load_recipe_clears_undo_history(qtbot, tmp_path):
+    window = MainWindow()
+    qtbot.addWidget(window)
+    window.add_operator("io.image_source")
+    assert window._undo_action.isEnabled() is True
+
+    recipe_path = tmp_path / "recipe.json"
+    window.save_recipe_to(str(recipe_path))
+    window.load_recipe_from(str(recipe_path))
+
+    assert window._undo_action.isEnabled() is False
+    assert window._redo_action.isEnabled() is False
+
+
 def test_full_pipeline_updates_preview_on_param_change(qtbot, tmp_path):
     window = MainWindow()
     qtbot.addWidget(window)
@@ -764,6 +1284,126 @@ def test_full_pipeline_updates_preview_on_param_change(qtbot, tmp_path):
     assert window.image_view._pixmap is not None
     assert window.status_label.text() == ""
     assert len(window.graph.edges) == 2
+
+
+def test_shift_measurements_for_roi_offset_shifts_only_position_keys():
+    measurements = [
+        {
+            "bbox_x": 1,
+            "bbox_y": 2,
+            "bbox_w": 5,
+            "bbox_h": 6,
+            "centroid_x": 3.5,
+            "centroid_y": 4.5,
+            "obb_cx": 3.0,
+            "obb_cy": 4.0,
+            "obb_w": 5.0,
+            "obb_h": 6.0,
+            "area": 30.0,
+            "bbox_mm_x": 0.1,
+            "bbox_mm_y": 0.2,
+        }
+    ]
+
+    shifted = main_window_module._shift_measurements_for_roi_offset(measurements, 10, 20, mm_per_px=0.5)
+
+    m = shifted[0]
+    assert (m["bbox_x"], m["bbox_y"]) == (11, 22)
+    assert (m["centroid_x"], m["centroid_y"]) == (13.5, 24.5)
+    assert (m["obb_cx"], m["obb_cy"]) == (13.0, 24.0)
+    # boyut/alan alanları bir kırpma OFSETİNDEN etkilenmemeli -- sadece KONUM alanları kayar.
+    assert (m["bbox_w"], m["bbox_h"], m["area"]) == (5, 6, 30.0)
+    assert m["bbox_mm_x"] == 0.1 + 10 * 0.5
+    assert m["bbox_mm_y"] == 0.2 + 20 * 0.5
+    # orijinal liste mutasyona uğramamalı.
+    assert measurements[0]["bbox_x"] == 1
+
+
+def test_shift_measurements_for_roi_offset_ignores_unrelated_keys_like_shape_match_pose():
+    # `geom.shape_match`'in "x"/"y" poz alanları `bbox_x`/`centroid_x` DEĞİL -- yanlışlıkla
+    # kaydırılmamalı.
+    measurements = [{"x": 5.0, "y": 6.0, "angle": 12.0, "score": 0.9}]
+
+    shifted = main_window_module._shift_measurements_for_roi_offset(measurements, 100, 100, mm_per_px=0.0)
+
+    assert shifted == measurements
+
+
+def test_cumulative_roi_offset_sums_enabled_rect_roi_before_target(qtbot):
+    window = MainWindow()
+    qtbot.addWidget(window)
+    roi_id = window.add_operator("roi.region")
+    props_id = window.add_operator("analysis.region_props")
+    window.graph.nodes[roi_id].params.update({"enabled": True, "shape": "RECT", "x": 7, "y": 9})
+
+    assert main_window_module._cumulative_roi_offset(window.graph, window.pipeline.order, props_id) == (7, 9)
+
+
+def test_cumulative_roi_offset_ignores_disabled_roi(qtbot):
+    window = MainWindow()
+    qtbot.addWidget(window)
+    roi_id = window.add_operator("roi.region")
+    props_id = window.add_operator("analysis.region_props")
+    window.graph.nodes[roi_id].params.update({"enabled": False, "shape": "RECT", "x": 7, "y": 9})
+
+    assert main_window_module._cumulative_roi_offset(window.graph, window.pipeline.order, props_id) == (0, 0)
+
+
+def test_cumulative_roi_offset_ignores_roi_step_after_target(qtbot):
+    window = MainWindow()
+    qtbot.addWidget(window)
+    props_id = window.add_operator("analysis.region_props")
+    roi_id = window.add_operator("roi.region")  # hedeften SONRA eklendi -- etkilememeli
+    window.graph.nodes[roi_id].params.update({"enabled": True, "shape": "RECT", "x": 7, "y": 9})
+
+    assert main_window_module._cumulative_roi_offset(window.graph, window.pipeline.order, props_id) == (0, 0)
+
+
+def test_cumulative_roi_offset_handles_circle_shape(qtbot):
+    window = MainWindow()
+    qtbot.addWidget(window)
+    roi_id = window.add_operator("roi.region")
+    props_id = window.add_operator("analysis.region_props")
+    window.graph.nodes[roi_id].params.update({"enabled": True, "shape": "CIRCLE", "cx": 50, "cy": 60, "r": 20})
+
+    assert main_window_module._cumulative_roi_offset(window.graph, window.pipeline.order, props_id) == (30, 40)
+
+
+def test_region_props_measurement_boxes_shifted_by_roi_offset_in_normal_view(qtbot, tmp_path):
+    # Gerçek kullanıcı sorusu: "bölge ölçümü yaparken ROI'de seçebiliyor muyum, kalibrasyon
+    # bozuluyor mu?" -- roi.region + segment.connected_components + analysis.region_props
+    # zaten checkbox zincirine oturuyor ve mm/px kalibrasyonu bir kırpmadan etkilenmiyor
+    # (alan/boy ölçümleri doğru kalıyor), ama "Normal" görünüm modunda (tam çözünürlüklü ham
+    # kare) ölçüm kutuları eskiden ROI'nin sol-üst köşesi kadar KAYIYORDU çünkü bbox
+    # koordinatları KIRPILMIŞ görüntüye göreydi. Bu, uçtan uca doğru düzeltildiğini doğrular.
+    window = MainWindow()
+    qtbot.addWidget(window)
+    path = _sample_image_path(tmp_path)  # 20x20, beyaz kare [5:15, 5:15]
+
+    src_id = window.add_operator("io.image_source")
+    roi_id = window.add_operator("roi.region")
+    window.add_operator("segment.connected_components")
+    props_id = window.add_operator("analysis.region_props")
+
+    window._on_step_selected(src_id)
+    window.param_form.params_changed.emit({"path": str(path)})
+
+    window._on_step_selected(roi_id)
+    window.param_form.params_changed.emit(
+        {"enabled": True, "shape": "RECT", "x": 3, "y": 4, "w": 15, "h": 15, "cx": 100, "cy": 100, "r": 50}
+    )
+
+    window._view_mode = "normal"
+    window._on_step_selected(props_id)
+
+    measurements = window.image_view._measurements
+    assert measurements
+    # Ham (kırpılmamış) karedeki beyaz kare [5:15,5:15] ROI (x=3,y=4) içinde [2:11,1:11]
+    # olarak kalır -- "Normal" moddaki bbox, ROI ofseti EKLENMİŞ tam kare koordinatında
+    # olmalı (yani orijinal beyaz karenin gerçek konumuna -- 5,5 civarına -- yakın), KIRPILMIŞ
+    # karenin ham (2,1) gibi bir bbox'ı DEĞİL.
+    assert measurements[0]["bbox_x"] >= 3
+    assert measurements[0]["bbox_y"] >= 4
 
 
 def test_remove_operator_clears_preview_when_selected_node_removed(qtbot, tmp_path):
@@ -824,6 +1464,31 @@ def test_invalid_source_path_reports_error_in_status(qtbot, tmp_path):
     window.param_form.params_changed.emit({"path": str(tmp_path / "yok.png")})
 
     assert window.status_label.text().startswith("Hata:")
+
+
+def test_load_recipe_writes_persistent_log_entry(qtbot, tmp_path):
+    """Reçete yükleme gibi önemli olaylar artık kalıcı log dosyasına da yazılıyor (bkz.
+    `io_utils/app_log.py`) — sadece anlık `status_label` metnine değil, konsol kapalıyken de
+    saha desteği için kalıcı bir iz kalmalı."""
+    from imgflow.io_utils.app_log import get_logger, setup_logging
+
+    log_dir = tmp_path / "logs"
+    setup_logging(directory=log_dir)
+    try:
+        window = MainWindow()
+        qtbot.addWidget(window)
+        window.add_operator("io.image_source")
+        recipe_path = tmp_path / "recipe.json"
+        window.save_recipe_to(str(recipe_path))
+
+        window.load_recipe_from(str(recipe_path))
+
+        content = (log_dir / "imgflow.log").read_text(encoding="utf-8")
+        assert str(recipe_path) in content
+    finally:
+        for handler in list(get_logger().handlers):
+            get_logger().removeHandler(handler)
+            handler.close()
 
 
 def test_save_and_load_recipe_roundtrip_preserves_pipeline(qtbot, tmp_path):
@@ -897,6 +1562,44 @@ def test_load_recipe_with_missing_field_shows_friendly_error_instead_of_crashing
     assert "bozuk" in calls[0][1].lower()
 
 
+def test_export_current_image_writes_file(qtbot, tmp_path, monkeypatch):
+    """Gerçek kullanıcı iş akışı: kameradan/dosyadan alınan görüntüye filtre uygulayıp,
+    sonucu Şekil Eşleştirme'de referans olarak kullanmak üzere gerçek bir resim dosyasına
+    dışa aktarma — reçete (.json) DEĞİL (bkz. `test_import_recipe_json_shows_specific_
+    guidance_not_raw_keyerror` içindeki ilgili bug)."""
+    window = MainWindow()
+    qtbot.addWidget(window)
+    image_path = _sample_image_path(tmp_path)
+    window.open_image(str(image_path))
+
+    out_path = tmp_path / "disa_aktarilan.png"
+    monkeypatch.setattr(
+        "imgflow.ui.main_window.QFileDialog.getSaveFileName", lambda *a, **k: (str(out_path), "")
+    )
+
+    window._on_export_current_image()
+
+    assert out_path.exists()
+    assert "dışa aktarıldı" in window.status_label.text()
+
+
+def test_export_current_image_without_selection_shows_info_not_file_dialog(qtbot, monkeypatch):
+    window = MainWindow()
+    qtbot.addWidget(window)
+    calls = []
+    monkeypatch.setattr("imgflow.ui.main_window.QMessageBox.information", lambda *a, **k: calls.append(a))
+    save_dialog_calls = []
+    monkeypatch.setattr(
+        "imgflow.ui.main_window.QFileDialog.getSaveFileName",
+        lambda *a, **k: save_dialog_calls.append(1) or ("", ""),
+    )
+
+    window._on_export_current_image()
+
+    assert len(calls) == 1
+    assert save_dialog_calls == []
+
+
 def test_capture_gallery_dock_wraps_panel_and_is_closable(qtbot):
     from PySide6.QtWidgets import QDockWidget
 
@@ -947,6 +1650,148 @@ def test_height_scale_calibration_capture_refreshes_gallery_panel(qtbot, tmp_pat
     assert refreshed == [1]
 
 
+def test_capture_photo_action_enabled_for_any_camera(qtbot):
+    window = MainWindow()
+    qtbot.addWidget(window)
+    assert window._capture_photo_action.isEnabled() is False
+
+    window.start_camera(_FakeCameraSource([np.zeros((10, 10, 3), dtype=np.uint8)]))
+    assert window._capture_photo_action.isEnabled() is True
+
+    window.stop_camera()
+    assert window._capture_photo_action.isEnabled() is False
+
+
+def test_capture_camera_photo_saves_frame_and_refreshes_gallery(qtbot, tmp_path, monkeypatch):
+    from imgflow.core import capture_store
+
+    monkeypatch.setattr(capture_store, "CAPTURE_DIR", tmp_path / "captures")
+
+    window = MainWindow()
+    qtbot.addWidget(window)
+    window.start_camera(_FakeCameraSource([np.full((10, 10, 3), 200, dtype=np.uint8)]))
+    window._on_camera_tick()
+
+    window._on_capture_camera_photo()
+
+    records = capture_store.list_captures()
+    assert len(records) == 1
+    assert records[0].source == "live"
+    assert "kaydedildi" in window.status_label.text()
+
+
+def test_capture_camera_photo_without_camera_shows_inline_status_not_modal(qtbot):
+    window = MainWindow()
+    qtbot.addWidget(window)
+
+    window._on_capture_camera_photo()
+
+    assert "kamera yok" in window.status_label.text()
+
+
+def test_capture_photo_quick_button_stays_in_sync_with_menu_action(qtbot):
+    """Görüntü panelinin hemen üstündeki hızlı-erişim çubuğu (`_capture_photo_button`) Kamera
+    menüsündeki `_capture_photo_action` ile AYNI etkin/devre dışı durumunu paylaşmalı —
+    kullanıcı kamerayı sadece butondan açsa/kapatsa bile ikisi de senkron kalmalı."""
+    window = MainWindow()
+    qtbot.addWidget(window)
+    assert window._capture_photo_button.isEnabled() is False
+
+    window.start_camera(_FakeCameraSource([np.zeros((10, 10, 3), dtype=np.uint8)]))
+    assert window._capture_photo_button.isEnabled() is True
+    assert window._capture_photo_button.isEnabled() == window._capture_photo_action.isEnabled()
+
+    window.stop_camera()
+    assert window._capture_photo_button.isEnabled() is False
+    assert window._capture_photo_button.isEnabled() == window._capture_photo_action.isEnabled()
+
+
+def test_capture_photo_quick_button_click_saves_frame(qtbot, tmp_path, monkeypatch):
+    from imgflow.core import capture_store
+
+    monkeypatch.setattr(capture_store, "CAPTURE_DIR", tmp_path / "captures")
+
+    window = MainWindow()
+    qtbot.addWidget(window)
+    window.start_camera(_FakeCameraSource([np.full((10, 10, 3), 200, dtype=np.uint8)]))
+    window._on_camera_tick()
+
+    window._capture_photo_button.click()
+
+    assert len(capture_store.list_captures()) == 1
+
+
+def test_capture_gallery_open_requested_loads_image_into_pipeline(qtbot, tmp_path):
+    """Gerçek kullanıcı isteği: "çektiğim fotoğraflarda daha sonradan uzunluk bulabilmeliyim"
+    -- galeriden çift tıklama/'Pipeline'a Yükle' ile yayınlanan `open_requested` sinyali
+    `open_image`'e bağlı olmalı (sürükle-bırak yoluyla, `_on_image_file_dropped`, AYNI çağrı)."""
+    window = MainWindow()
+    qtbot.addWidget(window)
+    path = _sample_image_path(tmp_path)
+
+    window.capture_gallery_panel.open_requested.emit(str(path))
+
+    src_nodes = [n for n in window.graph.nodes.values() if n.op_id == "io.image_source"]
+    assert len(src_nodes) == 1
+    assert src_nodes[0].params["path"] == str(path)
+
+
+def test_capture_camera_photo_before_any_tick_shows_inline_status(qtbot):
+    window = MainWindow()
+    qtbot.addWidget(window)
+    window.start_camera(_FakeCameraSource([np.zeros((10, 10, 3), dtype=np.uint8)]))
+
+    window._on_capture_camera_photo()
+
+    assert "kare alınmadı" in window.status_label.text()
+
+
+def test_capture_filtered_frame_saves_pipeline_output_and_refreshes_gallery(qtbot, tmp_path, monkeypatch):
+    """Gerçek kullanıcı isteği: "filtrelediğim fotoğrafı da yakalayıp sağ taraftaki panele
+    atmak istiyorum" -- `_on_capture_camera_photo`'nun aksine kamera GEREKMEZ, seçili adımın
+    filtrelenmiş çıktısı (`_current_preview_image()`, `_on_export_current_image` ile AYNI
+    kaynak) 'Yakalananlar' galerisine 'filtered' kaynağıyla kaydedilir."""
+    from imgflow.core import capture_store
+
+    monkeypatch.setattr(capture_store, "CAPTURE_DIR", tmp_path / "captures")
+
+    window = MainWindow()
+    qtbot.addWidget(window)
+    image_path = _sample_image_path(tmp_path)
+    window.open_image(str(image_path))
+
+    window._on_capture_filtered_frame()
+
+    records = capture_store.list_captures()
+    assert len(records) == 1
+    assert records[0].source == "filtered"
+    assert "kaydedildi" in window.status_label.text()
+
+
+def test_capture_filtered_frame_without_selection_shows_inline_status_not_modal(qtbot):
+    window = MainWindow()
+    qtbot.addWidget(window)
+
+    window._on_capture_filtered_frame()
+
+    assert "önce bir pipeline adımı seçin" in window.status_label.text()
+
+
+def test_capture_filtered_button_click_saves_frame(qtbot, tmp_path, monkeypatch):
+    from imgflow.core import capture_store
+
+    monkeypatch.setattr(capture_store, "CAPTURE_DIR", tmp_path / "captures")
+
+    window = MainWindow()
+    qtbot.addWidget(window)
+    image_path = _sample_image_path(tmp_path)
+    window.open_image(str(image_path))
+
+    window._capture_filtered_button.click()
+
+    assert len(capture_store.list_captures()) == 1
+
+
 def test_run_batch_process_writes_csv(qtbot, tmp_path):
     window = MainWindow()
     qtbot.addWidget(window)
@@ -972,6 +1817,50 @@ def test_run_batch_process_writes_csv(qtbot, tmp_path):
     assert len(rows) == 1
     assert rows[0]["image"] == "a.png"
     assert output_csv.exists()
+
+
+def test_on_run_batch_runs_in_background_thread_with_isolated_graph(qtbot, tmp_path, monkeypatch):
+    """Menüden tetiklenen 'Toplu İşlem...' artık arka planda (QThread) çalışmalı ve worker'a
+    verilen graph, canlı `window.graph`'ın izole bir kopyası olmalı (bkz. `_BatchWorker`
+    docstring'i) — batch sürerken UI'daki canlı graph'ın node parametreleri DEĞİŞMEMELİ."""
+    window = MainWindow()
+    qtbot.addWidget(window)
+
+    window.add_operator("io.image_source")
+    window.add_operator("color.grayscale")
+    th_id = window.add_operator("segment.threshold")
+    window.add_operator("segment.connected_components")
+    props_id = window.add_operator("analysis.region_props")
+    window._on_step_selected(th_id)
+    window.param_form.params_changed.emit({"value": 100, "max_value": 255, "mode": "BINARY"})
+    window._on_step_selected(props_id)
+
+    input_dir = tmp_path / "images"
+    input_dir.mkdir()
+    img = np.zeros((20, 20, 3), dtype=np.uint8)
+    img[5:15, 5:15] = 255
+    cv2.imwrite(str(input_dir / "a.png"), img)
+    output_csv = tmp_path / "out.csv"
+
+    monkeypatch.setattr(
+        "imgflow.ui.main_window.QFileDialog.getExistingDirectory", lambda *a, **k: str(input_dir)
+    )
+    monkeypatch.setattr(
+        "imgflow.ui.main_window.QFileDialog.getSaveFileName", lambda *a, **k: (str(output_csv), "")
+    )
+    monkeypatch.setattr("imgflow.ui.main_window.QMessageBox.information", lambda *a, **k: None)
+
+    params_before = copy.deepcopy(window.graph.nodes[props_id].params)
+
+    window._on_run_batch()
+    worker = window._batch_worker
+    assert worker is not None
+
+    with qtbot.waitSignal(worker.finished_ok, timeout=5000):
+        pass
+
+    assert output_csv.exists()
+    assert window.graph.nodes[props_id].params == params_before
 
 
 def test_open_image_creates_source_node_when_missing(qtbot, tmp_path):
@@ -1128,6 +2017,50 @@ def test_results_panel_lists_shape_match_instances_by_number(qtbot, tmp_path, mo
     assert "Toplam: 1" in window.results_panel.text()
 
     window._on_step_selected(src_id)
+
+
+def test_refresh_preview_populates_step_durations_table_for_pipeline_steps(qtbot, tmp_path):
+    """Gerçek kullanıcı isteği: "her işlemin sonucunun süresi sonuçlar kısmında yazmalı" --
+    pipeline'daki HER adımın (sadece seçili adımın değil) en son ne kadar sürdüğü, sırayla ve
+    Türkçe etiketle Sonuçlar panelindeki küçük tabloya ulaşmalı."""
+    from imgflow.ui.panels.operator_library import label_for
+
+    window = MainWindow()
+    qtbot.addWidget(window)
+    path = _sample_image_path(tmp_path)
+    window.open_image(str(path))
+    gray_id = window.add_operator("color.grayscale")
+    window._on_step_selected(gray_id)
+
+    table = window.results_panel._duration_table
+    assert table.rowCount() == 2
+    assert table.item(0, 0).text() == label_for("io.image_source")
+    assert table.item(1, 0).text() == label_for("color.grayscale")
+    assert table.item(0, 1).text().endswith(" ms")
+    assert table.item(1, 1).text().endswith(" ms")
+
+
+def test_live_camera_tick_also_populates_step_durations_table(qtbot):
+    """Adım süreleri tablosu sadece senkron `_refresh_preview` yolunda değil, `_LiveTickWorker`
+    üzerinden gelen canlı kamera sonucunda da dolmalı -- ikisi de AYNI `_build_preview_frame`
+    fonksiyonunu paylaştığından ek bir sinyal/thread mekanizması gerekmez (bkz. `PreviewFrameResult
+    .step_durations`). Kaynak (`io.image_source`) düğümü canlı akışta HER ZAMAN `inject_result`
+    ile doldurulur (gerçek `run()` çağrılmaz, bkz. `core/engine.py::inject_result`), bu yüzden
+    tabloda SADECE gerçekten çalıştırılan downstream adım (`color.grayscale`) görünür."""
+    from imgflow.ui.panels.operator_library import label_for
+
+    window = MainWindow()
+    qtbot.addWidget(window)
+    window.add_operator("io.image_source")
+    gray_id = window.add_operator("color.grayscale")
+    window._on_step_selected(gray_id)
+    window.start_camera(_FakeCameraSource([np.zeros((10, 10, 3), dtype=np.uint8)]))
+
+    _run_camera_tick_and_wait(window, qtbot)
+
+    table = window.results_panel._duration_table
+    assert table.rowCount() == 1
+    assert table.item(0, 0).text() == label_for("color.grayscale")
 
 
 def _fx_1000_lens_profile():
@@ -1417,6 +2350,85 @@ def test_new_region_props_node_gets_mm_per_px_after_calibration_already_stable(q
     assert node.params["mm_per_px"] == pytest.approx(0.4)
 
 
+def test_push_mm_per_px_also_updates_geom_shape_match_nodes(qtbot):
+    """Gerçek kullanıcı isteği: "geometrik eşlemede scale boyutu ... da yazmalı" (netleşen
+    anlamı: bulunan nesnenin gerçek dünya boyutu/öteleme mesafesi mm cinsinden) -- otomatik
+    kalibrasyon akışı artık `analysis.region_props` ile AYNI şekilde `geom.shape_match`
+    düğümlerinin de `mm_per_px` parametresini doldurur."""
+    window = MainWindow()
+    qtbot.addWidget(window)
+    match_id = window.add_operator("geom.shape_match")
+
+    window._push_mm_per_px(0.4, refresh=False)
+
+    assert window.graph.nodes[match_id].params["mm_per_px"] == pytest.approx(0.4)
+
+
+def test_push_mm_per_px_does_not_get_silently_reverted_by_unrelated_param_edit(qtbot):
+    """Gerçek kullanıcı raporu: "kalibrasyon ayarı kendi kendine kaybolabiliyor". Kök neden:
+    `_push_mm_per_px` `node.params`'ı `ParamForm`'un HABERİ OLMADAN doğrudan güncelliyordu --
+    node o an seçili/panelde gösteriliyorsa `ParamForm._values` ESKİ `mm_per_px`'te kalıyordu.
+    Kullanıcı sonra AYNI node'da başka bir parametreyi değiştirdiğinde (`_on_params_changed`
+    formun TÜM `_values`'ini `node.params`'ın üzerine koşulsuz yazdığından, bkz. o metot),
+    otomatik hesaplanan kalibrasyon kullanıcı hiç dokunmamış olsa bile SESSİZCE sıfırlanıyordu.
+    `_push_mm_per_px`'in artık seçili node için `ParamForm.set_value()` ile formun önbelleğini
+    de HEMEN güncellemesi bunu önlemeli."""
+    window = MainWindow()
+    qtbot.addWidget(window)
+    node_id = window.add_operator("analysis.region_props")  # add_operator zaten seçer
+
+    window._push_mm_per_px(0.4, refresh=False)
+    assert window.graph.nodes[node_id].params["mm_per_px"] == pytest.approx(0.4)
+    # Formun kendi önbelleği de senkron olmalı, aksi halde aşağıdaki adım bug'ı YAKALAMAZ.
+    assert window.param_form.values()["mm_per_px"] == pytest.approx(0.4)
+
+    # Kullanıcı kalibrasyona hiç dokunmadan, AYNI node'da BAŞKA bir parametreyi değiştiriyor
+    # -- ParamForm gerçekte formun TÜM (mm_per_px dahil) `_values`'ini yayınlar.
+    edited_values = dict(window.param_form.values())
+    edited_values["min_area"] = 42.0
+    window._on_params_changed(edited_values)
+
+    assert window.graph.nodes[node_id].params["mm_per_px"] == pytest.approx(0.4)
+    assert window.graph.nodes[node_id].params["min_area"] == pytest.approx(42.0)
+
+
+def test_push_mm_per_px_does_not_touch_form_of_a_different_selected_node(qtbot):
+    """`ParamForm.set_value()` sadece güncellenen node PANELDE GÖSTERİLİYORSA çağrılmalı --
+    başka bir node seçiliyken (ör. kullanıcı `roi.region` adımını inceliyor) formun o an
+    gösterdiği (region_props'a AİT OLMAYAN) alanlara yanlışlıkla yazılmamalı."""
+    window = MainWindow()
+    qtbot.addWidget(window)
+    window.add_operator("analysis.region_props")
+    roi_id = window.add_operator("roi.region")  # son eklenen otomatik seçili olur
+
+    window._push_mm_per_px(0.4, refresh=False)
+
+    assert window._selected_node_id == roi_id
+    assert "mm_per_px" not in window.param_form.values()
+
+
+def test_new_shape_match_node_gets_mm_per_px_after_calibration_already_stable(qtbot):
+    """`_region_props_needs_mm_per_px`'in genişletilmiş kontrolü sayesinde, kalibrasyon
+    stabilize olduktan SONRA eklenen yeni bir `geom.shape_match` düğümü de (region_props'un
+    üstteki testle AYNI senaryosu) sonsuza kadar varsayılan `mm_per_px=0.0`'da KALMAMALI."""
+    from imgflow.ui.main_window import _AUTO_HEIGHT_TICK_STRIDE
+
+    window = MainWindow()
+    qtbot.addWidget(window)
+    window._plane_rectification = _sample_plane_rectification(mm_per_px=0.4)
+
+    frame = np.zeros((480, 640, 3), dtype=np.uint8)
+    window.start_camera(_FakeCameraSource([frame] * (_AUTO_HEIGHT_TICK_STRIDE * 4)))
+    for _ in range(_AUTO_HEIGHT_TICK_STRIDE):
+        window._on_camera_tick()
+
+    match_id = window.add_operator("geom.shape_match")
+    for _ in range(_AUTO_HEIGHT_TICK_STRIDE):
+        window._on_camera_tick()
+
+    assert window.graph.nodes[match_id].params["mm_per_px"] == pytest.approx(0.4)
+
+
 def test_load_calibration_profile_applies_plane_rectification_mm_per_px_immediately(qtbot, monkeypatch):
     from imgflow.io_utils import calibration_store
 
@@ -1476,6 +2488,153 @@ def test_lens_calibrated_applies_reference_distance_and_plane_rectification_imme
     assert node.params["mm_per_px"] == pytest.approx(0.4)
 
 
+def test_adjust_height_delta_rescales_plane_rectification_homography_and_mm_per_px(qtbot, monkeypatch):
+    """Gerçek kullanıcı raporu: "bant yüksekliği değişti diyip ölçüm alıyorum fakat çok
+    yanlış ölçüyor". Kök neden: bu metot eskiden SADECE `mm_per_px` alanını güncelleyip
+    `homography`/`output_size`'ı DOKUNULMADAN bırakıyordu -- ama `rectify()`'ın kullandığı
+    `homography` matrisi `compute_plane_rectification`'da `1/mm_per_px` ölçeğini zaten İÇİNE
+    gömüyor (bkz. `world_to_output`), yani `_on_camera_tick` HER karede hâlâ ESKİ ölçekle
+    rektifiye ediyordu ama ölçüm operatörleri YENİ `mm_per_px`'i kullanıyordu -- tam olarak
+    (eski/yeni oranı) kadar sistematik ölçüm hatası. Düzeltme: `homography`/`output_size`
+    de AYNI `(eski_mm_per_px/yeni_mm_per_px)` oranıyla rescale edilmeli."""
+    window = MainWindow()
+    qtbot.addWidget(window)
+    window.add_operator("analysis.region_props")
+    window._active_lens_profile = _fx_1000_lens_profile()
+    original = _sample_plane_rectification(mm_per_px=0.4)
+    window._plane_rectification = original
+    monkeypatch.setattr("imgflow.ui.main_window.QInputDialog.getDouble", lambda *a, **k: (50.0, True))
+
+    window._on_adjust_height_delta()
+
+    # eski mesafe = 0.4*1000 = 400mm; +50mm yaklaştı -> yeni mesafe 350mm -> mm_per_px 0.35
+    assert window._plane_rectification is not original
+    assert window._plane_rectification.mm_per_px == pytest.approx(0.35)
+    scale_ratio = 0.4 / 0.35
+    expected_homography = np.diag([scale_ratio, scale_ratio, 1.0]) @ original.homography
+    np.testing.assert_allclose(window._plane_rectification.homography, expected_homography)
+    expected_output_size = (
+        max(1, round(original.output_size[0] * scale_ratio)),
+        max(1, round(original.output_size[1] * scale_ratio)),
+    )
+    assert window._plane_rectification.output_size == expected_output_size
+    node = next(n for n in window.graph.nodes.values() if n.op_id == "analysis.region_props")
+    assert node.params["mm_per_px"] == pytest.approx(0.35)
+
+
+def _apply_homography_for_test(h: np.ndarray, points: np.ndarray) -> np.ndarray:
+    ones = np.ones((points.shape[0], 1))
+    homogeneous = np.hstack([points, ones])
+    transformed = (h @ homogeneous.T).T
+    return transformed[:, :2] / transformed[:, 2:3]
+
+
+def test_adjust_height_delta_keeps_world_point_to_mm_consistent(qtbot, monkeypatch):
+    """Doğrudan tutarlılık kanıtı: aynı ham (undistort edilmiş) piksel, ayarlamadan ÖNCE ve
+    SONRA rektifiye edilip kendi `mm_per_px`'i ile çarpıldığında AYNI gerçek-dünya mm
+    konumunu vermeli -- bu, "ölçüm çok yanlış çıkıyor" raporunun kök nedenini (rescale
+    edilmeyen homography ile YENİ mm_per_px'in tutarsız kalması) doğrudan test ediyor."""
+    window = MainWindow()
+    qtbot.addWidget(window)
+    window._active_lens_profile = _fx_1000_lens_profile()
+    original = _sample_plane_rectification(mm_per_px=0.4)
+    window._plane_rectification = original
+    monkeypatch.setattr("imgflow.ui.main_window.QInputDialog.getDouble", lambda *a, **k: (50.0, True))
+
+    raw_point = np.array([[300.0, 200.0]])
+    before_rectified_px = _apply_homography_for_test(original.homography, raw_point)[0]
+    before_world_mm = before_rectified_px * original.mm_per_px
+
+    window._on_adjust_height_delta()
+
+    after_rectified_px = _apply_homography_for_test(window._plane_rectification.homography, raw_point)[0]
+    after_world_mm = after_rectified_px * window._plane_rectification.mm_per_px
+
+    np.testing.assert_allclose(after_world_mm, before_world_mm, rtol=1e-9)
+
+
+def test_adjust_height_delta_updates_reference_distance(qtbot, monkeypatch):
+    window = MainWindow()
+    qtbot.addWidget(window)
+    window.add_operator("analysis.region_props")
+    window._active_lens_profile = _fx_1000_lens_profile()
+    window._reference_distance_mm = 830.0
+    monkeypatch.setattr("imgflow.ui.main_window.QInputDialog.getDouble", lambda *a, **k: (30.0, True))
+
+    window._on_adjust_height_delta()
+
+    assert window._reference_distance_mm == pytest.approx(800.0)
+    node = next(n for n in window.graph.nodes.values() if n.op_id == "analysis.region_props")
+    assert node.params["mm_per_px"] == pytest.approx(0.8)
+
+
+def test_adjust_height_delta_rejects_distance_going_non_positive(qtbot, monkeypatch):
+    """Geçersiz (fiziksel olarak imkansız) bir delta girilirse mevcut kalibrasyon DEĞİŞMEMELİ
+    — sadece durum etiketinde hata gösterilir (bkz. CLAUDE.md: tekrarlayan bir döngüden değil
+    ama yine de burada modal DEĞİL, satır içi hata tercih edilir)."""
+    window = MainWindow()
+    qtbot.addWidget(window)
+    window._active_lens_profile = _fx_1000_lens_profile()
+    window._reference_distance_mm = 830.0
+    monkeypatch.setattr("imgflow.ui.main_window.QInputDialog.getDouble", lambda *a, **k: (900.0, True))
+
+    window._on_adjust_height_delta()
+
+    assert window._reference_distance_mm == pytest.approx(830.0)
+    assert "Geçersiz" in window.status_label.text()
+
+
+def test_adjust_height_delta_updates_legacy_height_scale_model(qtbot, monkeypatch):
+    from imgflow.core.height_scale_calibration import HeightScaleModel, TeachPoint
+
+    window = MainWindow()
+    qtbot.addWidget(window)
+    window.add_operator("analysis.region_props")
+    model = HeightScaleModel()
+    model.add_point(TeachPoint(height_mm=50.0, pixel_distance=15.0, real_mm=20.0))
+    model.add_point(TeachPoint(height_mm=100.0, pixel_distance=20.0, real_mm=20.0))
+    model.fit()
+    window._height_scale_model = model
+    window._active_height_mm = 75.0
+    monkeypatch.setattr("imgflow.ui.main_window.QInputDialog.getDouble", lambda *a, **k: (25.0, True))
+
+    window._on_adjust_height_delta()
+
+    assert window._active_height_mm == pytest.approx(100.0)
+    expected_mm_per_px = 1.0 / model.predict_scale(100.0)
+    node = next(n for n in window.graph.nodes.values() if n.op_id == "analysis.region_props")
+    assert node.params["mm_per_px"] == pytest.approx(expected_mm_per_px)
+
+
+def test_adjust_height_delta_rejects_height_scale_model_out_of_range(qtbot, monkeypatch):
+    from imgflow.core.height_scale_calibration import HeightScaleModel, TeachPoint
+
+    window = MainWindow()
+    qtbot.addWidget(window)
+    model = HeightScaleModel()
+    model.add_point(TeachPoint(height_mm=50.0, pixel_distance=15.0, real_mm=20.0))
+    model.add_point(TeachPoint(height_mm=100.0, pixel_distance=20.0, real_mm=20.0))
+    model.fit()
+    window._height_scale_model = model
+    window._active_height_mm = 75.0
+    monkeypatch.setattr("imgflow.ui.main_window.QInputDialog.getDouble", lambda *a, **k: (200.0, True))
+
+    window._on_adjust_height_delta()
+
+    assert window._active_height_mm == pytest.approx(75.0)
+    assert "Geçersiz" in window.status_label.text()
+
+
+def test_adjust_height_delta_shows_message_when_no_calibration_active(qtbot, monkeypatch):
+    window = MainWindow()
+    qtbot.addWidget(window)
+    monkeypatch.setattr("imgflow.ui.main_window.QInputDialog.getDouble", lambda *a, **k: (10.0, True))
+
+    window._on_adjust_height_delta()
+
+    assert "kalibrasyon" in window.status_label.text().lower()
+
+
 def test_view_mode_combo_updates_view_mode(qtbot):
     window = MainWindow()
     qtbot.addWidget(window)
@@ -1493,7 +2652,7 @@ def test_get_normal_base_image_uses_last_camera_frame_when_camera_active(qtbot):
     window._camera_source = _FakeCameraSource([])
     window._last_camera_frame = frame
 
-    result = window._get_normal_base_image()
+    result = _get_normal_base_image_for(window)
 
     assert result is frame
 
@@ -1502,7 +2661,7 @@ def test_get_normal_base_image_returns_none_without_camera_or_source(qtbot):
     window = MainWindow()
     qtbot.addWidget(window)
 
-    assert window._get_normal_base_image() is None
+    assert _get_normal_base_image_for(window) is None
 
 
 def test_get_normal_base_image_returns_static_source_image(qtbot, tmp_path):
@@ -1511,7 +2670,7 @@ def test_get_normal_base_image_returns_static_source_image(qtbot, tmp_path):
     path = _sample_image_path(tmp_path)
     window.open_image(str(path))
 
-    result = window._get_normal_base_image()
+    result = _get_normal_base_image_for(window)
 
     assert result is not None
     assert result.shape[:2] == (20, 20)
@@ -1523,7 +2682,7 @@ def test_compose_display_image_filtered_mode_returns_filtered_image_unchanged(qt
     window._view_mode = "filtered"
     filtered = np.zeros((5, 5, 3), dtype=np.uint8)
 
-    result, hover_measurements = window._compose_display_image(filtered, None, 0.0)
+    result, hover_measurements = _compose_display_image_for(window, filtered, None, 0.0)
 
     assert result is filtered
     assert hover_measurements is None
@@ -1536,7 +2695,7 @@ def test_compose_display_image_filtered_mode_passes_through_measurements_for_hov
     filtered = np.zeros((5, 5, 3), dtype=np.uint8)
     measurements = [{"bbox_x": 1, "bbox_y": 1, "bbox_w": 2, "bbox_h": 2}]
 
-    _, hover_measurements = window._compose_display_image(filtered, measurements, 0.0)
+    _, hover_measurements = _compose_display_image_for(window, filtered, measurements, 0.0)
 
     # küçük görüntü _MAX_PREVIEW_DIM altında -> ölçek=1.0, koordinatlar DEĞİŞMEDEN geçer
     assert hover_measurements == measurements
@@ -1563,7 +2722,7 @@ def test_compose_display_image_normal_mode_draws_overlay_on_raw_frame_without_mu
         }
     ]
 
-    result, hover_measurements = window._compose_display_image(
+    result, hover_measurements = _compose_display_image_for(window, 
         np.zeros((20, 20), dtype=np.uint8), measurements, 0.0
     )
 
@@ -1582,7 +2741,7 @@ def test_compose_display_image_normal_mode_without_measurements_returns_plain_ra
     window._camera_source = _FakeCameraSource([])
     window._last_camera_frame = raw
 
-    result, hover_measurements = window._compose_display_image(np.zeros((10, 10), dtype=np.uint8), None, 0.0)
+    result, hover_measurements = _compose_display_image_for(window, np.zeros((10, 10), dtype=np.uint8), None, 0.0)
 
     assert (result == 128).all()
     assert hover_measurements is None
@@ -1597,7 +2756,7 @@ def test_compose_display_image_both_mode_concatenates_horizontally(qtbot):
     window._last_camera_frame = raw
     filtered = np.zeros((10, 8, 3), dtype=np.uint8)
 
-    result, hover_measurements = window._compose_display_image(filtered, None, 0.0)
+    result, hover_measurements = _compose_display_image_for(window, filtered, None, 0.0)
 
     assert result.shape[0] == 10
     assert result.shape[1] == 8 + 4 + 8  # sol + ayırıcı (4px) + sağ
@@ -1611,7 +2770,7 @@ def test_compose_display_image_both_mode_falls_back_to_single_side_when_other_mi
     # kamera yok, io.image_source node'u da yok -> normal taraf None olmalı
     filtered = np.zeros((10, 8, 3), dtype=np.uint8)
 
-    result, hover_measurements = window._compose_display_image(filtered, None, 0.0)
+    result, hover_measurements = _compose_display_image_for(window, filtered, None, 0.0)
 
     assert result is filtered
     assert hover_measurements is None
@@ -1650,7 +2809,7 @@ def test_compose_display_image_normal_mode_caps_large_frame_for_display(qtbot):
     window._camera_source = _FakeCameraSource([])
     window._last_camera_frame = large_raw
 
-    result, _ = window._compose_display_image(np.zeros((1200, 2400), dtype=np.uint8), None, 0.0)
+    result, _ = _compose_display_image_for(window, np.zeros((1200, 2400), dtype=np.uint8), None, 0.0)
 
     assert max(result.shape[:2]) == 1600
 
@@ -1711,3 +2870,63 @@ def test_hover_measurement_changed_signal_updates_left_panel_label(qtbot):
     window.image_view.hover_measurement_changed.emit({"label": "x", "obb_w": 1.0, "obb_h": 1.0})
 
     assert "Etiket: x" in window.hover_info_label.text()
+
+
+def test_window_re_maximizes_itself_if_restored_to_normal_state(qtbot):
+    """Gerçek kullanıcı raporu: "uygulama kendi kendine tam ekrandan çıkıyor ve ekran
+    kayıyor, bazı panellere erişemiyorum, o yüzden tam ekrandan hiç çıkmasın." Pencere
+    durumu HERHANGİ bir yolla (başlık çubuğu çift tıklama, Aero Snap, vb.) düz "geri
+    yüklenmiş" (`WindowNoState`) hale dönerse `MainWindow.changeEvent` onu HEMEN tekrar
+    büyütmeli -- küçültme (görev çubuğuna atma) ise SERBEST kalmalı."""
+    window = MainWindow()
+    qtbot.addWidget(window)
+    window.showMaximized()
+    assert window.isMaximized()
+
+    window.showNormal()
+
+    assert window.isMaximized()
+
+
+def test_window_can_still_be_minimized(qtbot):
+    """`changeEvent`'in yeniden büyütme kuralı SADECE düz "geri yüklenmiş" (`WindowNoState`)
+    duruma uygulanmalı -- küçültülmüş (görev çubuğu) durumu zorla geri getirilmemeli. (Qt'de
+    "küçültülmüş" durum genelde "büyütülmüşken küçültüldü" bilgisini de birlikte taşır --
+    `isMaximized()` bu yüzden burada kontrol EDİLMİYOR, sadece gerçek küçültme davranışının
+    engellenmediği doğrulanıyor.)"""
+    window = MainWindow()
+    qtbot.addWidget(window)
+    window.showMaximized()
+
+    window.showMinimized()
+
+    assert window.isMinimized()
+
+
+def test_switching_right_tabs_reasserts_splitter_sizes(qtbot):
+    """Gerçek kullanıcı raporu: "roi seçtikten sonra başka bir sekmeye geçince zoomluyor" --
+    `right_tabs`'ın (Parametreler/Kamera Ayarları/Sonuçlar) aktif sekmesi değişince, o
+    sekmenin farklı bir `sizeHint()`'i `central_splitter`'ın panolar arası alanı sessizce
+    yeniden dağıtmasına yol açabiliyordu -- bu da orta (görüntü) panelinin genişliğini
+    değiştirip `ImageView._rescale()`'in sığdırma ölçeğini kaydırıyor, kullanıcıya istenmeyen
+    bir zoom gibi görünüyordu. `_on_right_tabs_changed` artık sekme değişiminden hemen önceki
+    boyutları yakalayıp bir sonraki olay turunda tekrar uyguluyor."""
+    window = MainWindow()
+    qtbot.addWidget(window)
+    window.show()
+
+    calls: list[list[int]] = []
+    original_set_sizes = window.central_splitter.setSizes
+
+    def spy(sizes):
+        calls.append(list(sizes))
+        original_set_sizes(sizes)
+
+    window.central_splitter.setSizes = spy
+    current_sizes = window.central_splitter.sizes()
+
+    window.right_tabs.setCurrentWidget(window.camera_settings_panel)
+    qtbot.wait(50)
+
+    assert calls
+    assert calls[-1] == current_sizes

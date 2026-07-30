@@ -381,6 +381,174 @@ def test_load_profile_applies_height_model_and_emits_signal(qtbot, tmp_path):
     assert "hat10" in dialog._save_status_label.text()
 
 
+def test_capture_frame_appends_to_gallery_instead_of_replacing(qtbot):
+    """Gerçek kullanıcı raporu: "çektiğim fotoğraflar aşağıdaki [galeriye] gelmiyor" --
+    eskiden 'Kare Yakala' tek bir kareyi ÜZERİNE YAZIYORDU (galeri yoktu). Artık her yakalama
+    galeriye EKLENMELİ."""
+    dialog = HeightScaleCalibrationDialog(lambda: _FRAME)
+    qtbot.addWidget(dialog)
+
+    dialog._on_capture_frame()
+    dialog._on_capture_frame()
+    dialog._on_capture_frame()
+
+    assert len(dialog._gallery_frames) == 3
+    assert dialog._gallery_list.count() == 3
+
+
+def test_capturing_marks_newest_frame_as_active_with_star(qtbot):
+    dialog = HeightScaleCalibrationDialog(lambda: _FRAME)
+    qtbot.addWidget(dialog)
+
+    dialog._on_capture_frame()
+    dialog._on_capture_frame()
+
+    assert dialog._gallery_list.item(0).text() == "#1"
+    assert dialog._gallery_list.item(1).text() == "★ #2"
+
+
+def test_clicking_gallery_item_activates_that_frame_in_canvas(qtbot):
+    dialog = HeightScaleCalibrationDialog(lambda: _FRAME)
+    qtbot.addWidget(dialog)
+    other_frame = np.full((50, 60, 3), 200, dtype=np.uint8)
+
+    dialog._on_capture_frame()  # index 0: _FRAME
+    dialog._frame_provider = lambda: other_frame
+    dialog._on_capture_frame()  # index 1: other_frame, aktif olur
+
+    assert dialog._captured_frame.shape == other_frame.shape
+
+    dialog._on_gallery_item_clicked(dialog._gallery_list.item(0))
+
+    assert dialog._captured_frame.shape == _FRAME.shape
+    assert dialog._gallery_list.item(0).text() == "★ #1"
+    assert dialog._gallery_list.item(1).text() == "#2"
+
+
+def test_gallery_files_dropped_appends_multiple_frames(qtbot, tmp_path):
+    """Yakalananlar (yan panel) galerisinden bu diyalogun galerisine doğrudan sürükleyip
+    bırakma -- gerçek kullanıcı isteği: "yandaki daha önceden yakaladığım kareleri de
+    kullanabilmeliyim"."""
+    import cv2
+
+    dialog = HeightScaleCalibrationDialog(lambda: None)
+    qtbot.addWidget(dialog)
+    path1 = tmp_path / "a.png"
+    path2 = tmp_path / "b.png"
+    cv2.imwrite(str(path1), _FRAME)
+    cv2.imwrite(str(path2), _FRAME)
+
+    dialog._on_gallery_files_dropped([str(path1), str(path2)])
+
+    assert len(dialog._gallery_frames) == 2
+    assert dialog._captured_frame is not None
+
+
+def test_detect_board_batch_without_checked_frames_shows_message(qtbot):
+    dialog = HeightScaleCalibrationDialog(lambda: _BOARD_FRAME)
+    qtbot.addWidget(dialog)
+
+    dialog._on_detect_board_batch()
+
+    assert "işaretleyin" in dialog._board_status_label.text()
+    assert len(dialog.model.points) == 0
+
+
+def test_detect_board_batch_processes_all_checked_frames(qtbot):
+    dialog = HeightScaleCalibrationDialog(lambda: _BOARD_FRAME)
+    qtbot.addWidget(dialog)
+    dialog._board_cols_spin.setValue(9)
+    dialog._board_rows_spin.setValue(6)
+    dialog._board_square_spin.setValue(25.0)
+    dialog._height_spin.setValue(80.0)
+
+    dialog._on_capture_frame()  # galeriye #1 (tahta var)
+    dialog._frame_provider = lambda: _FRAME
+    dialog._on_capture_frame()  # galeriye #2 (düz kare, tahta YOK)
+
+    dialog._on_detect_board_batch()
+
+    assert len(dialog.model.points) == 1  # sadece #1'de tahta bulundu
+    assert "2 işaretli kareden 1 tanesinde" in dialog._board_status_label.text()
+
+
+def test_detect_board_batch_skips_unchecked_frames(qtbot):
+    dialog = HeightScaleCalibrationDialog(lambda: _BOARD_FRAME)
+    qtbot.addWidget(dialog)
+    dialog._board_cols_spin.setValue(9)
+    dialog._board_rows_spin.setValue(6)
+    dialog._board_square_spin.setValue(25.0)
+    dialog._height_spin.setValue(80.0)
+
+    dialog._on_capture_frame()
+    dialog._gallery_list.item(0).setCheckState(Qt.CheckState.Unchecked)
+
+    dialog._on_detect_board_batch()
+
+    assert "işaretleyin" in dialog._board_status_label.text()
+    assert len(dialog.model.points) == 0
+
+
+def test_angled_mount_without_lens_profile_shows_persistent_warning(qtbot):
+    dialog = HeightScaleCalibrationDialog(lambda: _FRAME)
+    qtbot.addWidget(dialog)
+
+    assert dialog._angled_warning_label.text() == ""
+
+    dialog._mount_angled_radio.setChecked(True)
+
+    assert "Açılı montaj seçili" in dialog._angled_warning_label.text()
+
+    dialog._mount_vertical_radio.setChecked(True)
+
+    assert dialog._angled_warning_label.text() == ""
+
+
+def test_angled_mount_with_lens_profile_shows_no_warning(qtbot):
+    dialog = HeightScaleCalibrationDialog(lambda: _FRAME, lens_profile_provider=lambda: _SYNTHETIC_LENS_PROFILE)
+    qtbot.addWidget(dialog)
+
+    dialog._mount_angled_radio.setChecked(True)
+
+    assert dialog._angled_warning_label.text() == ""
+
+
+def test_show_event_refreshes_angled_warning(qtbot):
+    """Kullanıcı 'Lens Kalibrasyonunu Aç...' ile araya girip Lens Kalibrasyonu'nu
+    tamamlamış olabilir -- pencere tekrar öne geldiğinde uyarı güncellenmeli."""
+    profile_holder = {"profile": None}
+    dialog = HeightScaleCalibrationDialog(lambda: _FRAME, lens_profile_provider=lambda: profile_holder["profile"])
+    qtbot.addWidget(dialog)
+    dialog._mount_angled_radio.setChecked(True)
+    assert dialog._angled_warning_label.text() != ""
+
+    profile_holder["profile"] = _SYNTHETIC_LENS_PROFILE
+    dialog.show()
+
+    assert dialog._angled_warning_label.text() == ""
+
+
+def test_open_lens_calibration_button_hidden_without_callback(qtbot):
+    dialog = HeightScaleCalibrationDialog(lambda: _FRAME)
+    qtbot.addWidget(dialog)
+    dialog.show()
+
+    assert dialog._open_lens_button.isVisible() is False
+
+
+def test_open_lens_calibration_button_visible_and_calls_callback(qtbot):
+    calls = []
+    dialog = HeightScaleCalibrationDialog(lambda: _FRAME, open_lens_calibration=lambda: calls.append(1))
+    qtbot.addWidget(dialog)
+    dialog.show()
+
+    assert dialog._open_lens_button.isVisible() is True
+
+    dialog._on_open_lens_calibration_clicked()
+
+    assert calls == [1]
+
+
 def test_load_profile_with_unknown_name_shows_inline_error(qtbot, tmp_path):
     dialog = HeightScaleCalibrationDialog(lambda: _FRAME, calibration_dir=tmp_path)
     qtbot.addWidget(dialog)
