@@ -326,19 +326,15 @@ class RoiCanvas(ImageView):
         if button == Qt.MouseButton.RightButton:
             if not self._polygon_closed and self._polygon_points:
                 self._polygon_points.pop()
-                self.update()
                 self.polygon_changed.emit(list(self._polygon_points))
+                self.update()
             return
         if self._polygon_closed:
             self._polygon_drag_index = self._vertex_at(pos)
             return
         self._polygon_points.append(dt.widget_point_to_image(pos, self._image_size, self._widget_size()))
-        self.update()
-        # HER nokta eklenişinde (sadece kapanışta değil) yayınlanır: dialog'daki "Poligonu
-        # Kapat" butonunun etkinliği SADECE bu sinyalle güncelleniyor, nokta eklerken
-        # ateşlenmezse buton hiç etkinleşmiyordu (gerçek kullanıcı raporu: "en az 3 nokta
-        # çizmeme rağmen ... noktalar birleşmiyor").
         self.polygon_changed.emit(list(self._polygon_points))
+        self.update()
 
     def _mouse_press_circle(self, pos: QPoint) -> None:
         handle = self._handle_at_circle(pos)

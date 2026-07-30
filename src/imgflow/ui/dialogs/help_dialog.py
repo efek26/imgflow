@@ -8,8 +8,21 @@ from PySide6.QtWidgets import QDialog, QTextBrowser, QVBoxLayout
 
 _HELP_HTML = """
 <h2>Kalibrasyon İş Akışı Kılavuzu</h2>
-<p><b>Genel sıra:</b> Kamerayı aç &rarr; (açılı montajda zorunlu) Lens Kalibrasyonu &rarr;
-Yükseklik-Ölçek Kalibrasyonu &rarr; Aktif Yükseklik Ayarla &rarr; Ölçüm Aracı.</p>
+<p><b>Lens Kalibrasyonu ile Yükseklik-Ölçek Kalibrasyonu farklı şeyleri ölçer, ikisi de
+checkerboard kullanabilir ama BİRBİRİNİN YERİNE GEÇMEZ:</b></p>
+<ul>
+<li><b>Lens Kalibrasyonu</b> = kameranın kendi özelliği (odak uzaklığı + distorsiyon).
+Kamera/lens/zoom değişmediği sürece geçerli kalır; tahtayı farklı açı/mesafelerde
+göstererek BİRÇOK kare gerektirir.</li>
+<li><b>Yükseklik-Ölçek Kalibrasyonu</b> = kurulumun özelliği ("bu kamera şu an banda göre
+ne kadar uzakta/açılı duruyor" &rarr; 1 piksel kaç mm). Kamera hareket ettirilirse
+(yükseklik/açı değişirse) HER SEFERİNDE tekrarlanması gerekir.</li>
+</ul>
+<p><b>Yeni bir kurulum için önerilen (hızlı) yol:</b> Kamerayı aç &rarr; Lens Kalibrasyonu
+&mdash; TEK diyalogda hem intrinsics'i hem de ölçeği/düzlemi çözer, ayrı bir Yükseklik-Ölçek
+adımına GEREK KALMAZ (bkz. adım 3, "Referans (Bant Seviyesi)"). Yükseklik-Ölçek Kalibrasyonu
+diyaloğu ESKİ/manuel bir yedek yöntemdir &mdash; sadece checkerboard'ınız yoksa (2 noktaya
+elle tıklama) ya da lens kalibrasyonu yapmadan kaba bir ölçek yeterliyse kullanın.</p>
 
 <h3>1) Kamerayı Açma</h3>
 <p><b>Kamera</b> menüsü &rarr; <i>USB Kamera Aç...</i> / <i>GigE/Basler Kamera Aç...</i> /
@@ -37,16 +50,22 @@ açılışta otomatik yükleme.</li>
 <p>Her alanın üzerine gelindiğinde (tooltip) o alanın ne işe yaradığını açıklayan bir
 ipucu görünür.</p>
 
-<h3>3) Lens Kalibrasyonu (intrinsics)</h3>
+<h3>3) Lens Kalibrasyonu (intrinsics + ölçek/düzlem, önerilen tek durak)</h3>
 <p><b>Kamera</b> menüsü &rarr; <i>Lens Kalibrasyonu...</i> &mdash; kamera açık olmalı.
 Tahta türünü seç (Klasik Checkerboard veya ChArUco), tahtayı farklı açı/mesafelerden
-göstererek <i>Kare Yakala</i> ile birkaç kare topla, <i>Kalibre Et</i> ile RMS hatayı gör,
-istersen isim vererek <i>Profili Kaydet</i>.</p>
+göstererek <i>Kare Yakala</i> ile birkaç kare topla, <i>Kalibre Et</i> ile RMS hatayı gör.
+Ardından galeride, checkerboard'ı ölçülecek ürünün durduğu düzleme (bandın üstüne) koyarak
+çektiğin BİR kareyi <i>Referans (Bant Seviyesi)</i> olarak işaretle &mdash; bu, kamera
+düzleme dik olmasa (Açılı montaj) bile KONUM-BAĞIMSIZ doğru <i>mm_per_px</i> üretir (düzlem
+homografisi). İstersen isim vererek <i>Profili Kaydet</i>.</p>
 
-<h3>4) Yükseklik-Ölçek Kalibrasyonu</h3>
-<p><b>Araçlar</b> menüsü &rarr; <i>Yükseklik Kalibrasyonu (Öğretme)...</i>. Kamera Montajı
-(Dik/Açılı) seç &mdash; açılı montaj lens kalibrasyonu ister. <i>Kare Yakala</i> sonrası ya
-kanvasta bilinen uzunluğa iki nokta tıklayıp yükseklik/gerçek mesafeyi elle gir
+<h3>4) Yükseklik-Ölçek Kalibrasyonu (ESKİ/manuel yedek yöntem)</h3>
+<p><b>Araçlar</b> menüsü &rarr; <i>Yükseklik Kalibrasyonu (Öğretme, elle)...</i>. Lens
+Kalibrasyonu'nda "Referans (Bant Seviyesi)" zaten işaretlendiyse bu adıma GEREK YOK. Sadece
+checkerboard'sız kaba bir ölçek (2 noktaya tıklayıp gerçek mesafeyi elle girme) ya da lens
+kalibrasyonu yapmadan Dik montajda basit bir piksel-aralığı ölçeği gerekiyorsa kullan. Kamera
+Montajı (Dik/Açılı) seç &mdash; açılı montaj lens kalibrasyonu ister. <i>Kare Yakala</i>
+sonrası ya kanvasta bilinen uzunluğa iki nokta tıklayıp yükseklik/gerçek mesafeyi elle gir
 (<i>Nokta Ekle</i>), ya da tahtayı <i>Tahtayı Algıla</i> ile otomatik ölçtür. En az 2 farklı
 yükseklikte nokta topladıktan sonra <i>Modeli Hesapla</i>, sonra istersen
 <i>Profili Kaydet</i>.</p>

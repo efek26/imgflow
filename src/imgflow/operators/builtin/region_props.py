@@ -39,8 +39,10 @@ def draw_measurements_overlay(
     kullanır (bkz. `ui/main_window.py` "Normal"/"İkisi Bir Arada" görünüm modları) — böylece
     ölçüm hesaplaması ile hangi görüntü üzerinde gösterildiği birbirinden bağımsızdır.
 
-    Boyutlar cm cinsinden yazılır (mm_per_px'ten türetilir, kalibrasyon zaten mm/px SI
-    biriminde tutulur) — px sadece kalibrasyon hiç yoksa (mm_per_px<=0) yedek olarak kullanılır."""
+    Kalibrasyon varsa (mm_per_px>0) boyut HEM px HEM cm cinsinden yazılır -- gerçek kullanıcı
+    isteği: "kalibrasyon seçili olduğu her senaryoda pixelin yanında mm de yazsın veya cm"
+    (önceden kalibrasyon aktifken px değeri TAMAMEN gizleniyordu, sadece cm gösteriliyordu).
+    Kalibrasyon yoksa (mm_per_px<=0) sadece px gösterilir."""
     overlay = np.ascontiguousarray(base_image).copy()
     if overlay.ndim == 2:
         overlay = cv2.cvtColor(overlay, cv2.COLOR_GRAY2BGR)
@@ -71,7 +73,10 @@ def draw_measurements_overlay(
         )
         if mm_per_px > 0:
             cm_per_px = mm_per_px / 10.0
-            dim_text = f"{m['obb_w'] * cm_per_px:.2f} x {m['obb_h'] * cm_per_px:.2f} cm"
+            dim_text = (
+                f"{m['obb_w']:.0f} x {m['obb_h']:.0f} px "
+                f"({m['obb_w'] * cm_per_px:.2f} x {m['obb_h'] * cm_per_px:.2f} cm)"
+            )
         else:
             dim_text = f"{m['obb_w']:.0f} x {m['obb_h']:.0f} px"
         if "tolerance_ok" in m:

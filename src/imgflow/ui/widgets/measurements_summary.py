@@ -140,12 +140,16 @@ class MeasurementsSummaryPanel(QWidget):
                 # bu ek metin HİÇ eklenmez.
                 if "scale_percent" in m:
                     line += f"  ölçek=%{m['scale_percent']:.0f}"
-                if "width_px" in m:
-                    # Piksel boyutu kalibrasyon olmadan da anlamlıdır, bu yüzden esas alınır;
-                    # kalibrasyon VARSA mm karşılığı parantez içinde eklenir.
+                if "width_mm" in m:
+                    # Kalibrasyon aktifken px değeri de yanına yazılır -- gerçek kullanıcı
+                    # isteği: "kalibrasyon seçili olduğu her senaryoda pixelin yanında mm de
+                    # yazsın veya cm" (önceden sadece mm gösteriliyordu, px gizleniyordu).
+                    line += (
+                        f"  boy={m['width_px']:.0f}x{m['height_px']:.0f}px "
+                        f"({m['width_mm']:.1f}x{m['height_mm']:.1f}mm)"
+                    )
+                elif "width_px" in m:
                     line += f"  boy={m['width_px']:.0f}x{m['height_px']:.0f}px"
-                    if "width_mm" in m:
-                        line += f" ({m['width_mm']:.1f}x{m['height_mm']:.1f}mm)"
                 if "displacement_x_cm" in m:
                     line += (
                         f"  öteleme=x:{m['displacement_x_cm']:+.2f} y:{m['displacement_y_cm']:+.2f}cm"

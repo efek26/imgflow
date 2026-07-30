@@ -38,11 +38,17 @@ _GUIDE_TEXT = (
 
 
 class FlatFieldDialog(QDialog):
-    references_changed = Signal()
+    references_changed = Signal(str)
     """Kayıtlı referans KÜMESİ değiştiğinde (kaydet/sil) yayınlanır — ana pencere,
     `correction.flat_field` düğümü seçiliyse parametre panelindeki 'Aydınlatma Referansı'
     açılır listesini bu sinyalle canlı olarak yeniler (bkz. `_on_shape_models_changed`'in
-    ONNX/şekil eşleştirmedeki aynı deseni)."""
+    ONNX/şekil eşleştirmedeki aynı deseni). Bir KAYDETME'den geliyorsa parametre az önce
+    kaydedilen ismi taşır (silmede boş string) -- gerçek kullanıcı raporu: referansı
+    kaydetmek pipeline adımının 'reference_name' parametresini OTOMATİK seçmiyordu, kullanıcı
+    referansı kaydettiğini/yüklediğini düşünüp filtreyi uyguluyor ama alan hâlâ boş kaldığı
+    için "'reference_name' parametresi boş olamaz" hatası alıyordu. Ana pencere bu ismi,
+    SADECE seçili adımın `reference_name` alanı hâlâ BOŞSA otomatik doldurmak için kullanır
+    (doluysa kullanıcının üzerinde çalıştığı başka bir referansı sessizce değiştirmez)."""
 
     def __init__(self, directory: Path | None = None, parent=None) -> None:
         super().__init__(parent)
@@ -127,7 +133,7 @@ class FlatFieldDialog(QDialog):
         flatfield_store.save_reference(name, self._image, directory=self._directory)
         self._status_label.setText(f"Kaydedildi: '{name}'")
         self._refresh_list()
-        self.references_changed.emit()
+        self.references_changed.emit(name)
 
     def _refresh_list(self) -> None:
         current = self._list_combo.currentText()
@@ -149,4 +155,4 @@ class FlatFieldDialog(QDialog):
         flatfield_store.delete_reference(name, directory=self._directory)
         self._status_label.setText(f"Silindi: '{name}'")
         self._refresh_list()
-        self.references_changed.emit()
+        self.references_changed.emit("")

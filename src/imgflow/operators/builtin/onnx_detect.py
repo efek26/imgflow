@@ -129,9 +129,7 @@ class OnnxDetectOp:
         for name in model_names:
             meta = onnx_model_store.load_model_meta(name)
             task_type = meta["task_type"]
-            # Tür doğrulaması modeli YÜKLEMEDEN önce yapılır: bir yapılandırma hatası,
-            # onnxruntime'ın çok daha anlaşılmaz "protobuf ayrıştırılamadı" hatasının
-            # ardına gizlenmemeli.
+
             if task_type not in onnx_model_store.SUPPORTED_TASK_TYPES:
                 raise OnnxDetectionError(f"'{name}' modelinin türü ('{task_type}') tanınmıyor.")
             session = create_session(meta["path"])
@@ -218,9 +216,6 @@ class OnnxDetectOp:
                 overlay = render_segmentation_overlay(
                     overlay, seg.class_map, meta["class_labels"], defect_class_ids=defect_class_ids
                 )
-
-            else:
-                raise OnnxDetectionError(f"'{name}' modelinin türü ('{task_type}') tanınmıyor.")
 
         if detection_entries:
             overlay = render_detection_overlay(overlay, detection_entries)

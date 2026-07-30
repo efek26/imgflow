@@ -64,23 +64,28 @@ class ParamForm(QWidget):
                 container.setToolTip(spec.help)
             self._layout.addRow(label, container)
 
-        self._sync_combo_autoselection()
-
-    def _sync_combo_autoselection(self) -> None:
-        """Bir `QComboBox`'a `addItems()` çağrılır çağrılmaz Qt ilk öğeyi OTOMATİK seçili
-        gösterir. Saklanan değer boşsa ya da (eski bir reçetedeki kaldırılmış seçenek gibi)
-        listede yoksa, ekranda dolu görünen alan aslında `_values`'ta hâlâ eski/boş değeri
-        tutuyordu -- kullanıcı hiç dokunmasa bile operatör "parametre boş olamaz" hatası
-        vermeye devam ediyordu (gerçek kullanıcı raporu). Burada widget'ın GÖSTERDİĞİ değerle
-        `_values` hizalanır ve fark varsa TEK bir `params_changed` yayınlanır."""
+        # Qt, bir QComboBox'a `addItems()` ile en az bir öğe eklendiğinde -- kutu henüz HİÇ
+        # seçim yapılmamışken (currentIndex=-1) -- otomatik olarak İLK öğeyi seçili gösterir.
+        # Bu, widget'lar `_build_widget()`'ta kurulurken sinyal bağlantısından (`connect(...)`)
+        # ÖNCE olur, bu yüzden `_on_change` hiç tetiklenmez. Sonuç: `value` (node'un gerçek
+        # parametresi) boş/geçersiz olduğunda ekranda dolu/seçili görünen bir alan (ör. kayıtlı
+        # referanslardan/modellerden ilki) `self._values`'te -- ve dolayısıyla `set_params`'ı
+        # çağıran tarafın (`main_window`) düğüm `params`'ında -- hâlâ eski/boş kalıyordu. Gerçek
+        # kullanıcı raporu: Aydınlatma Düzeltme adımına referans seçiliymiş GİBİ görünüyordu
+        # ama filtre yine de "'reference_name' parametresi boş olamaz" hatası veriyordu. Kurulum
+        # bittikten SONRA her ComboBox'ın FİİLEN gösterdiği metni okuyup `_values` ile
+        # karşılaştırıyoruz; sapma varsa tek seferde düzeltip TEK bir `params_changed` ile dışarı
+        # bildiriyoruz ki çağıran taraf da gerçek ekran durumuyla senkron kalsın. `field_changed`
+        # BİLEREK yayılmıyor (`_on_change` çağrılmıyor) -- `camera_settings_panel.py` bu sinyali
+        # donanıma YAZMAK için dinliyor, sadece formu kurarken donanıma sessizce yazmamalı.
         corrected = False
-        for name, control in self._widgets.items():
-            if not isinstance(control, QComboBox):
-                continue
-            shown = control.currentText()
-            if self._values.get(name) != shown:
-                self._values[name] = shown
-                corrected = True
+        for spec in self._specs:
+            control = self._widgets[spec.name]
+            if isinstance(control, QComboBox):
+                actual = control.currentText()
+                if self._values.get(spec.name) != actual:
+                    self._values[spec.name] = actual
+                    corrected = True
         if corrected:
             self.params_changed.emit(dict(self._values))
 
@@ -288,9 +293,14 @@ class ParamForm(QWidget):
         buttons.rejected.connect(dialog.reject)
         layout.addWidget(buttons)
 
-        if dialog.exec() != QDialog.DialogCode.Accepted:
-            return None
-        return [box.text() for box in checkboxes if box.isChecked()]
+        accepted = dialog.exec() == QDialog.DialogCode.Accepted
+        result = [box.text() for box in checkboxes if box.isChecked()] if accepted else None
+        # `close()`/`exec()` sonrası C++ nesnesi `WA_DeleteOnClose` olmadan yaşamaya devam
+        # eder (bkz. `main_window._on_open_measurement_tool` sızıntısı) — bu dialog her
+        # çağrıda yeniden kurulduğundan `deleteLater()` olmadan her açılış bir hayalet
+        # widget bırakır.
+        dialog.deleteLater()
+        return result
 
     def _on_change(self, name: str, value: Any) -> None:
         self._values[name] = value

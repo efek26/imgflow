@@ -149,10 +149,9 @@ class ShapeMatchingDialog(QDialog):
     pencere, `geom.shape_match` düğümü seçiliyse parametre panelindeki 'Model Adı' açılır
     listesini bu sinyalle canlı olarak yeniler."""
     frame_captured = Signal()
-    """Aktif referans görüntü `capture_store`'a kaydedilince yayınlanır — ana pencere
-    yakalananlar galerisini tazeler (Lens/Yükseklik-Ölçek/Ölçüm diyaloglarıyla AYNI desen).
-    Gerçek kullanıcı isteği: "ölçüm de dahil her alanda kare yakalayıp yan ekrana atabilmek
-    istiyorum"."""
+    """Aktif referans görüntü galeriye eklendiğinde yayınlanır -- `LensCalibrationDialog`/
+    `HeightScaleCalibrationDialog`'daki AYNI sinyal, ana pencere `capture_gallery_panel.
+    refresh`'e bağlar."""
 
     def __init__(self, model_dir: Path | None = None, parent=None) -> None:
         super().__init__(parent)
@@ -232,6 +231,18 @@ class ShapeMatchingDialog(QDialog):
             lambda zoom: self._zoom_percent_label.setText(f"%{round(zoom * 100)}")
         )
 
+        # Gerçek kullanıcı isteği: "ölçüm de dahil her alanda kare yakalayıp yan ekrana
+        # atabilmek istiyorum" -- Lens/Yükseklik-Ölçek kalibrasyon diyaloglarının AYNI
+        # `capture_store` deposuna (`source="shape_match"`) yazan bir buton; bu diyalogda
+        # canlı kamera akışı YOK (sadece yüklenmiş/sürüklenmiş referans görüntüler), bu yüzden
+        # `self._reference_image` (o an aktif referans) galeriye eklenir.
+        self._capture_button = QPushButton("Referansı Galeriye Ekle")
+        self._capture_button.setToolTip(
+            "Şu an aktif referans görüntüyü 'Yakalanan Kareler' galerisine (yan panel) ekler."
+        )
+        self._capture_button.setEnabled(False)
+        self._capture_button.clicked.connect(self._on_capture_reference)
+
         zoom_bar = QHBoxLayout()
         zoom_bar.addWidget(QLabel("Yakınlaştırma:"))
         zoom_bar.addWidget(zoom_out_button)
@@ -239,6 +250,7 @@ class ShapeMatchingDialog(QDialog):
         zoom_bar.addWidget(zoom_fit_button)
         zoom_bar.addWidget(self._zoom_percent_label)
         zoom_bar.addStretch(1)
+        zoom_bar.addWidget(self._capture_button)
 
         load_button = QPushButton("Referans Görüntüler Yükle...")
         load_button.setToolTip("Birden fazla görüntü seçebilirsiniz — hepsi aşağıdaki galeriye eklenir.")
@@ -353,14 +365,6 @@ class ShapeMatchingDialog(QDialog):
         self._trained_filter_preview_caption.setFixedWidth(_TRAINED_PREVIEW_SIZE)
         self._trained_filter_preview_caption.setStyleSheet("font-size: 10px;")
 
-        self._capture_button = QPushButton("Kareyi Yakala")
-        self._capture_button.setToolTip(
-            "Aktif referans görüntüyü yakalananlar galerisine kaydeder (yan paneldeki "
-            "'Yakalanan Kareler' listesinde görünür)."
-        )
-        self._capture_button.setEnabled(False)  # aktif bir referans seçilene kadar kapalı
-        self._capture_button.clicked.connect(self._on_capture_reference)
-
         self._name_edit = QLineEdit()
         self._name_edit.setPlaceholderText("Model adı (ör. kapak_logo)")
         self._save_button = QPushButton("Kaydet")
@@ -446,7 +450,6 @@ class ShapeMatchingDialog(QDialog):
         controls_layout.addWidget(QLabel("Referans Galerisi:"))
         controls_layout.addWidget(self._reference_list)
         controls_layout.addWidget(self._active_reference_label)
-        controls_layout.addWidget(self._capture_button)
         controls_layout.addLayout(draw_mode_row)
         controls_layout.addWidget(self._contour_preview_label)
         controls_layout.addLayout(params_row)
@@ -657,14 +660,6 @@ class ShapeMatchingDialog(QDialog):
         self._trained_filter_preview_caption.setText(caption)
         self._trained_filter_preview_caption.setStyleSheet(style)
 
-    def _on_capture_reference(self) -> None:
-        """Bu diyalogda canlı kamera YOK — yakalanan şey AKTİF referans görüntüdür; Lens/
-        Yükseklik-Ölçek diyaloglarındaki AYNI `capture_store` deposuna yazılır."""
-        if self._active_reference_index is None:
-            return
-        capture_store.save_capture(self._reference_images[self._active_reference_index], source="shape_match")
-        self.frame_captured.emit()
-
     def _on_reference_gallery_item_clicked(self, item: QListWidgetItem) -> None:
         index = item.data(_REFERENCE_INDEX_ROLE)
         if index is None or index >= len(self._reference_images):
@@ -679,7 +674,6 @@ class ShapeMatchingDialog(QDialog):
         şu an modelin 'açı=0' baz aldığı poz olduğu belirsiz kalmasın diye."""
         self._active_reference_index = index
         self._use_reference_image(self._reference_images[index])
-        self._capture_button.setEnabled(True)
         self._active_reference_label.setText(f"Aktif referans: {self._reference_names[index]}")
         for i in range(self._reference_list.count()):
             item = self._reference_list.item(i)
@@ -689,6 +683,7 @@ class ShapeMatchingDialog(QDialog):
 
     def _use_reference_image(self, image: np.ndarray) -> None:
         self._reference_image = image
+        self._capture_button.setEnabled(True)
         self._canvas.set_image(image)
         # Gerçek kullanıcı raporu: "yüklediğim görüntü çok küçük kalabiliyor" -- kök neden bir
         # ÖNCEKİ referansta yakınlaştırma/uzaklaştırma kullanılmışsa `_zoom`'un sıfırlanmadan
@@ -705,6 +700,12 @@ class ShapeMatchingDialog(QDialog):
         self._on_polygon_changed([])
         self._train_status_label.setText("")
         self._refresh_contour_preview()
+
+    def _on_capture_reference(self) -> None:
+        if self._reference_image is None:
+            return
+        capture_store.save_capture(self._reference_image, source="shape_match")
+        self.frame_captured.emit()
 
     @staticmethod
     def _dilate_mask(mask: np.ndarray) -> np.ndarray:

@@ -34,6 +34,8 @@ _SOURCE_LABELS = {
     "height_scale": "Yükseklik-Ölçek",
     "live": "Fotoğraf",
     "filtered": "Filtrelenmiş",
+    "measurement": "Ölçüm",
+    "shape_match": "Şekil Eşleştirme",
 }
 
 

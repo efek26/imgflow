@@ -98,10 +98,14 @@ _DESCRIPTION_BY_OP_ID = {
         "için Kamera menüsündeki USB/GigE/Video seçeneklerini kullanın."
     ),
     "correction.flat_field": (
-        "Araçlar > Aydınlatma Referansı Kaydet... ile önceden kaydedilmiş BOŞ/düz aydınlatılmış "
-        "bir referans kareye (ör. boş bant) göre kenarlara doğru kararan (vignetting) ya da eşit "
-        "olmayan aydınlatmayı düzeltir (HALCON'daki div_image mantığına benzer). Pipeline'ın en "
-        "başına, eşikleme/renk analizi gibi aydınlatmaya duyarlı adımlardan ÖNCE eklenmelidir."
+        "İki modu var. 'Referans': Araçlar > Aydınlatma Referansı Kaydet... ile önceden "
+        "kaydedilmiş BOŞ/düz aydınlatılmış bir referans kareye (ör. boş bant) göre kenarlara "
+        "doğru kararan (vignetting) ya da eşit olmayan SABİT aydınlatmayı düzeltir (HALCON'daki "
+        "div_image mantığına benzer) — ürünün kendi gölgesi referansta olmadığından bu mod "
+        "gölgeleri DÜZELTMEZ. 'Yerel/Dinamik': referans gerektirmez, her karenin kendi bulanık "
+        "halinden yerel arka plan tahmini üretir — bu, o karedeki ürün gölgelerini de kapsar. "
+        "Pipeline'ın en başına, eşikleme/renk analizi gibi aydınlatmaya duyarlı adımlardan ÖNCE "
+        "eklenmelidir."
     ),
     "color.grayscale": (
         "Görüntüyü gri tonlamaya çevirir; CLAHE, eşikleme (OTSU/Adaptive/Manuel) ve tersini alma "
@@ -180,8 +184,11 @@ _DESCRIPTION_BY_OP_ID = {
         "doldurur. Bağlı Bileşenler'den önce nesnenin bütünlüğünü sağlamlaştırmak için kullanılır."
     ),
     "segment.connected_components": (
-        "Birbirine bağlı beyaz piksel gruplarını (nesneleri) etiketler ve sayar. Üründe kaç "
-        "parça/kusur olduğunu saymanın temel adımıdır — konveyör bandındaki nesne sayımında kullanılır."
+        "Birbirine bağlı piksel gruplarını (nesneleri) etiketler ve sayar. Üründe kaç "
+        "parça/kusur olduğunu saymanın temel adımıdır — konveyör bandındaki nesne sayımında "
+        "kullanılır. 'Ölçülecek Bölge' parametresiyle varsayılan beyaz/parlak bölgeler yerine "
+        "siyah/koyu bölgeler ya da her ikisi birden etiketlenebilir (gölge/aydınlatmadan "
+        "kaynaklı ters dönmüş bölgeler için)."
     ),
     "analysis.region_props": (
         "Etiketlenmiş her bölge için alan, çevre, merkez, sınırlayıcı kutu ve döndürülmüş "
@@ -215,8 +222,14 @@ _DESCRIPTION_BY_OP_ID = {
     "analysis.color_props": (
         "Tüm görüntünün (önceki bir ROI adımıyla daraltılmışsa sadece o alanın) L*a*b* "
         "ortalama/std değerlerini hesaplar; opsiyonel Tolerans Kontrolü açılırsa girilen bir "
-        "referans renkten ΔE (renk farkı) sapmasına göre OK/NG işaretler. Renk sapması/soluk "
-        "ürün/yanlış pişme gibi tondan kaynaklanan kusurların tespitinde, tek bir ürüne "
+        "referans renkten ΔE (renk farkı) sapmasına göre OK/NG işaretler. 'Otomatik Nesne "
+        "Tespiti' açılırsa tek karedeki birden fazla nesne (ör. farklı renkli balon/ürün) "
+        "otomatik bulunup HER biri için ayrı L*a*b* değerleri numaralanarak listelenir; "
+        "Min./Maks. Nesne Alanı ile küçük gürültü/büyük arka plan lekeleri elenebilir. "
+        "Parlak/yansıtıcı nesnelerde (ör. balonda ışık yansıması) otomatik Otsu eşiği "
+        "nesnenin tamamını yakalayamıyorsa Eşikleme Modu'nu 'manual' yapıp Eşik Değeri'ni "
+        "elle ayarlayın; yansımanın nesne içinde bıraktığı delikleri Delikleri Doldur, "
+        "sınırdaki ince kopuklukları Kapama Çekirdeği giderir. Kapalıyken tek bir ürüne "
         "odaklanmak için önce bir ROI adımı eklenmesi önerilir."
     ),
     "analysis.texture_props": (
@@ -224,7 +237,11 @@ _DESCRIPTION_BY_OP_ID = {
         "dokusunu gri-seviye eş-oluşum matrisi (GLCM/Haralick: contrast, homogeneity, "
         "energy, correlation) ile sayısallaştırır. Çizik/pürüzlülük/yüzey kusuru gibi renk "
         "yerine DOKU farkına dayanan kalite kontrolde kullanılır (HALCON'daki "
-        "gen_cooc_matrix/cooc_feature'a benzer)."
+        "gen_cooc_matrix/cooc_feature'a benzer). 'Otomatik Nesne Tespiti' açılırsa tek "
+        "karedeki birden fazla nesne otomatik bulunup her biri için doku özellikleri ayrı "
+        "ayrı numaralanarak listelenir; aynı Min./Maks. Nesne Alanı, Eşikleme Modu (Otsu/"
+        "manuel), Delikleri Doldur ve Kapama Çekirdeği seçenekleri (parlama/yansımayı "
+        "ayırt etmek için) burada da geçerlidir."
     ),
     "ml.onnx_detect": (
         "Araçlar > ONNX Model Kaydet... ile önceden isimle kaydedilmiş bir veya BİRDEN FAZLA "
@@ -325,10 +342,6 @@ class OperatorLibrary(QWidget):
                 category_item.addChild(op_item)
                 self._items_by_op_id[op_id] = op_item
         self._suppress_signal = False
-        # Gerçek kullanıcı isteği: "sol taraftaki operatör kütüphanesi alt başlıkları
-        # gözükecek şekilde açık olmasın, ana başlıklar olsun, alt başlıklar tıklayınca
-        # açılsın" -- kategoriler KAPALI başlar, arama kutusu geçici olarak açar
-        # (bkz. `_apply_filter`).
         self.tree.collapseAll()
 
     def set_checked(self, op_id: str, checked: bool) -> None:
@@ -340,6 +353,10 @@ class OperatorLibrary(QWidget):
         self._suppress_signal = False
 
     def _apply_filter(self, text: str) -> None:
+        """Kategoriler varsayılan olarak kapalı açılır (bkz. `refresh()`'teki `collapseAll()`)
+        -- arama yaparken alt öğelerin sadece `setHidden` ile gizlenmesi YETMEZ, kapalı bir
+        kategori zaten çocuklarını göstermiyor; bu yüzden eşleşmesi olan kategoriler burada
+        AYRICA açılır, arama kutusu boşaltılınca varsayılan kapalı duruma geri döner."""
         needle = text.strip().lower()
         for i in range(self.tree.topLevelItemCount()):
             category_item = self.tree.topLevelItem(i)
@@ -351,8 +368,6 @@ class OperatorLibrary(QWidget):
                 child.setHidden(not match)
                 visible_children += match
             category_item.setHidden(visible_children == 0)
-            # Arama yapılırken EŞLEŞEN kategoriler açılır (sonuçlar tek tıkla görünsün),
-            # kutu temizlenince hepsi tekrar kapanır -- kapalı başlangıç durumuna dönülür.
             category_item.setExpanded(bool(needle) and visible_children > 0)
 
     def _on_item_changed(self, item: QTreeWidgetItem, column: int) -> None:

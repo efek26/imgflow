@@ -253,24 +253,27 @@ class ShapeMatchOp:
                     "y": match.y,
                     "angle": match.angle,
                     "score": match.score,
-                    # Bulunan nesnenin PİKSEL boyutu -- kalibrasyon olmadan da anlamlı olduğu
-                    # için, `width_mm`/`height_mm`'in aksine HER ZAMAN raporlanır (ölçek
-                    # araması kapalıyken `match.scale` 1.0, yani öğretilen boyutun aynısı).
-                    "width_px": width_px * match.scale,
-                    "height_px": height_px * match.scale,
                 }
                 if scale_search_enabled:
                     # Gerçek kullanıcı isteği: "farklı boyutlarda aynı cisimden varsa scale
                     # boyutu yazmalı" -- SADECE Ölçek Araması açıkken eklenir (kapalıyken
                     # `match.scale` zaten hep 1.0, göstermek gürültü olurdu).
                     measurement["scale_percent"] = match.scale * 100.0
+                # Bulunan nesnenin piksel boyutu HER ZAMAN eklenir (kalibrasyon olsun olmasın)
+                # -- gerçek kullanıcı isteği: "kalibrasyon seçili olduğu her senaryoda pixelin
+                # yanında mm de yazsın veya cm" (önceden kalibrasyon aktifken px DEĞERİ hiç
+                # üretilmiyordu, sadece mm gösterilebiliyordu).
+                measured_width_px = width_px * match.scale
+                measured_height_px = height_px * match.scale
+                measurement["width_px"] = measured_width_px
+                measurement["height_px"] = measured_height_px
                 if mm_per_px > 0:
                     # Gerçek kullanıcı isteği: "geometrik eşlemede scale boyutu ... da
                     # yazmalı" -- bulunan nesnenin GERÇEK DÜNYA boyutu, ölçek araması
                     # açıkken bulunan ölçeğe göre ayarlanır (kapalıyken match.scale=1.0
                     # olduğundan davranış eskisiyle BİREBİR aynı kalır).
-                    measurement["width_mm"] = width_px * mm_per_px * match.scale
-                    measurement["height_mm"] = height_px * mm_per_px * match.scale
+                    measurement["width_mm"] = measured_width_px * mm_per_px
+                    measurement["height_mm"] = measured_height_px * mm_per_px
                 if model.reference_center is not None:
                     # Gerçek kullanıcı isteği: "... cismin ötelenme uzaklığı da yazmalı", ve
                     # sonraki turda: "ötelemeyi x,y şeklinde yaz ve kalibrasyon varsa cm

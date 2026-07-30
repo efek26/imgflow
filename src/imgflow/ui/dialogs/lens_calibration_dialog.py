@@ -77,34 +77,8 @@ from imgflow.core.lens_calibration import (
 from imgflow.core.plane_rectification import PlaneRectification, compute_plane_rectification
 from imgflow.io_utils import calibration_store
 from imgflow.io_utils.image_io import load_image
+from imgflow.ui.widgets.capture_drop_list import CaptureDropListWidget
 from imgflow.ui.widgets.image_view import ImageView, normalize_to_uint8, numpy_to_qimage
-
-
-class _CaptureDropListWidget(QListWidget):
-    """Yakalananlar galerisinden (`CaptureGalleryPanel`) ya da herhangi bir yerel dosyadan
-    sürüklenip bırakılan kareleri kabul eder — canlı kamera olmadan da (ör. bant durduğunda
-    daha önce yakalanmış zor bir kareyi) kalibrasyon setine eklemeyi sağlar. `files_dropped`
-    bırakılan tüm yerel dosya yollarını taşır; iç öğe taşıma davranışı DOKUNULMADAN kalır."""
-
-    files_dropped = Signal(list)  # list[str]
-
-    def __init__(self, parent=None) -> None:
-        super().__init__(parent)
-        self.setAcceptDrops(True)
-
-    def dragEnterEvent(self, event) -> None:  # noqa: N802 - Qt override
-        if any(url.isLocalFile() for url in event.mimeData().urls()):
-            event.acceptProposedAction()
-        else:
-            super().dragEnterEvent(event)
-
-    def dropEvent(self, event) -> None:  # noqa: N802 - Qt override
-        paths = [url.toLocalFile() for url in event.mimeData().urls() if url.isLocalFile()]
-        if paths:
-            self.files_dropped.emit(paths)
-            event.acceptProposedAction()
-        else:
-            super().dropEvent(event)
 
 _GUIDE_TEXT = (
     "1) Tahta türünü seçin  2) Tahtayı, ölçülecek cisimlerin duracağı GERÇEK düzlemde (ör. bant "
@@ -236,7 +210,7 @@ class LensCalibrationDialog(QDialog):
         button_row.addWidget(capture_button)
         button_row.addWidget(self._calibrate_button)
 
-        self._capture_list = _CaptureDropListWidget()
+        self._capture_list = CaptureDropListWidget()
         self._capture_list.setViewMode(QListWidget.ViewMode.IconMode)
         self._capture_list.setIconSize(QPixmap(_THUMB_SIZE, _THUMB_SIZE).size())
         self._capture_list.setResizeMode(QListWidget.ResizeMode.Adjust)

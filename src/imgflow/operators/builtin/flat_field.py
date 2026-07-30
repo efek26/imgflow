@@ -24,6 +24,12 @@
   hâlidir.
 
 İkisi de `max_gain`/`strength` güvenlik ağını PAYLAŞIR (bkz. aşağıdaki `run()`).
+
+Ayrıca HALCON'un `div_image(Image1, Image2, Mult, Add)` operatöründeki (`Sonuç =
+(Image1/Image2)*Mult + Add`) kod içinde elle ayarlanan `Mult`/`Add` sayısal değerlerine
+karşılık gelen `mult`/`add` parametreleri var -- otomatik hesaplanan kazanç haritasının
+ÜZERİNE ek bir çarpan/ekleme uygular (varsayılanları 1.0/0.0 olduğundan eklenmeden ÖNCEKİ
+davranışı DEĞİŞTİRMEZ), kullanıcı sonucu HALCON'daki gibi elle ince ayar yapabilsin diye.
 """
 
 from __future__ import annotations
@@ -120,11 +126,13 @@ class FlatFieldOp:
             default=1.0,
             min=0.0,
             max=10.0,
-            step=0.1,
+            step=0.05,
             label="Çarpan (Mult)",
-            help="HALCON'un div_image(Image1, Image2, Mult, Add) operatöründeki Mult ile AYNI: "
-            "düzeltilmiş sonucu ek bir sabit çarpanla ölçekler. Düzeltme sonrası görüntü genel "
-            "olarak çok karanlık/çok parlak kalıyorsa kullanılır. 1.0 = değişiklik yok.",
+            help="HALCON'un div_image(Image1, Image2, Mult, Add) operatöründeki 'Mult' "
+            "değeriyle AYNI -- otomatik hesaplanan kazanç haritasının üzerine EK bir sabit "
+            "çarpan uygular (Sonuç = (Görüntü/Arkaplan)*OtomatikKazanç*Mult + Add). "
+            "Varsayılan 1.0 önceki davranışı DEĞİŞTİRMEZ; sonucu genel olarak "
+            "karartmak/parlatmak için elle ince ayar yapılabilir.",
         ),
         ParamSpec(
             "add",
@@ -134,8 +142,10 @@ class FlatFieldOp:
             max=255.0,
             step=1.0,
             label="Ekleme (Add)",
-            help="HALCON'un div_image(...) operatöründeki Add ile AYNI: düzeltilmiş sonuca "
-            "sabit bir parlaklık ofseti ekler. 0 = değişiklik yok.",
+            help="HALCON'un div_image(Image1, Image2, Mult, Add) operatöründeki 'Add' "
+            "değeriyle AYNI -- bölme/çarpma işleminden SONRA her piksele sabit bir değer "
+            "ekler (ör. sonucu genel olarak biraz parlatmak/koyulaştırmak için). Varsayılan "
+            "0.0 önceki davranışı DEĞİŞTİRMEZ.",
         ),
     ]
 
@@ -181,16 +191,11 @@ class FlatFieldOp:
         if image.ndim == 3:
             gain = gain[:, :, None]
 
-        working = image.astype(np.float32)
-        corrected = working * gain
-        if strength < 1.0:
-            corrected = working * (1.0 - strength) + corrected * strength
-
-        # HALCON'un div_image(Image1, Image2, Mult, Add) çıktı ölçeklemesiyle AYNI; varsayılan
-        # (1.0 / 0.0) değerlerde sonuç bu adım hiç yokmuş gibi kalır.
         mult = float(params.get("mult", 1.0))
         add = float(params.get("add", 0.0))
-        if mult != 1.0 or add != 0.0:
-            corrected = corrected * mult + add
+        working = image.astype(np.float32)
+        corrected = working * gain * mult + add
+        if strength < 1.0:
+            corrected = working * (1.0 - strength) + corrected * strength
 
         return {"image": np.clip(corrected, 0, 255).astype(np.uint8)}

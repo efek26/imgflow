@@ -29,6 +29,8 @@ from PySide6.QtWidgets import (
     QInputDialog,
     QLabel,
     QPushButton,
+    QScrollArea,
+    QSizePolicy,
     QToolBox,
     QVBoxLayout,
     QWidget,
@@ -89,6 +91,20 @@ class CameraSettingsPanel(QWidget):
 
         self._status_label = QLabel(_DISCONNECTED_TEXT)
         self._status_label.setStyleSheet("font-weight: 600; padding: 2px;")
+        # `setWordWrap` YOKTU -- kamera bağlanınca (ör. önceki ayarlar otomatik geri
+        # yüklendiğinde `main_window.py::start_camera`'nın eklediği " — önceki ayarlar geri
+        # yüklendi" son ekiyle) metin uzayınca, sarmasız bir QLabel'ın minimumSizeHint'i
+        # TÜM metnin genişliğine eşit olur -- bu da yukarı doğru (panel -> sekme -> splitter
+        # -> ana pencere) taşınıp kullanıcı hiçbir şey yapmadan ana pencereyi zorla
+        # büyütüyordu (gerçek kullanıcı raporu: "gereksiz boyut değiştirme"). `setWordWrap`
+        # TEK BAŞINA yeterli DEĞİL -- metindeki tek bir uzun/boşluksuz "kelime" (ör. parantez
+        # içi sınıf adı "(BaslerCameraSource)") sarmayla bile bölünemediğinden minimumSizeHint
+        # hâlâ belirgin genişlikte kalıyordu (ölçülerek doğrulandı). Asıl çözüm yatay
+        # `QSizePolicy.Ignored`: layout bu widget'ın sizeHint/minimumSizeHint'ini TAMAMEN yok
+        # sayar, etiket mevcut alana göre sarar/kırpılır ama ASLA panelin (dolayısıyla ana
+        # pencerenin) minimum genişliğini büyütmez.
+        self._status_label.setWordWrap(True)
+        self._status_label.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
         refresh_button = QPushButton("⟳ Yenile")
         refresh_button.setToolTip("Tüm değerleri kameradan yeniden oku")
         refresh_button.clicked.connect(self.refresh)
@@ -129,11 +145,27 @@ class CameraSettingsPanel(QWidget):
 
         self._toolbox = QToolBox()
 
+        # Gerçek kullanıcı raporu: kamera bağlanıp `set_controller` gerçek GenICam
+        # kategorileriyle `_toolbox`'ı doldurunca (bkz. aşağıdaki `set_controller`), panel
+        # HİÇBİR sekme değişimi olmadan bile ana penceredeki `central_splitter`'ı zorlayıp
+        # TÜM pencereyi (kullanıcı hiç isteMEDEN) büyütüyordu -- `_on_right_tabs_changed`
+        # (bkz. `main_window.py`) SADECE sekme DEĞİŞİNCE devreye girdiğinden, kullanıcı zaten
+        # "Kamera Ayarları" sekmesindeyken kamerayı bağlarsa bu korumadan hiç faydalanmıyordu.
+        # Kök neden: `QToolBox` doğrudan bu düzene eklenmişti -- sayfalar dolunca büyüyen
+        # minimum boyut isteği ÖZÜMSENMEDEN doğrudan yukarı (panel -> sekme -> splitter ->
+        # ana pencere) taşınıyordu. `ShapeMatchingDialog`'un kontrol panelini `QScrollArea`'ya
+        # sarmalayan AYNI çözüm: `_toolbox` artık `setWidgetResizable(True)` ile bir
+        # `QScrollArea` içinde -- içerik ne kadar büyürse büyüsün dışarıya sadece KENDİ
+        # kaydırma çubuğuyla taşar, ana pencereyi asla zorlamaz.
+        toolbox_scroll = QScrollArea()
+        toolbox_scroll.setWidgetResizable(True)
+        toolbox_scroll.setWidget(self._toolbox)
+
         layout = QVBoxLayout(self)
         layout.addLayout(header)
         layout.addWidget(self._error_label)
         layout.addWidget(self._io_status_label)
-        layout.addWidget(self._toolbox, 1)
+        layout.addWidget(toolbox_scroll, 1)
 
     # -- genel API ------------------------------------------------------
 

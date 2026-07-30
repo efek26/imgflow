@@ -56,6 +56,7 @@ import numpy as np
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtGui import QIcon, QPixmap
 from PySide6.QtWidgets import (
+    QAbstractItemView,
     QButtonGroup,
     QComboBox,
     QDialog,
@@ -98,10 +99,6 @@ _RESIDUAL_WARNING_FACTOR = 2.0
 """Yeni modelin maks. kalanı, eskisinin bu kat üzerindeyse "kalite düştü" uyarısı gösterilir."""
 _THUMB_SIZE = 96
 _GALLERY_INDEX_ROLE = Qt.ItemDataRole.UserRole
-_ANGLED_WARNING_TEXT = (
-    "Açılı montaj seçili ama Lens Kalibrasyonu yok — açılı montajda mesafe/ölçek hesabı "
-    "lens bozulumunun giderilmiş olmasını gerektirir. Önce Lens Kalibrasyonunu tamamlayın."
-)
 _GUIDE_TEXT = (
     "Kamera Montajı seçin (açılıysa önce Lens Kalibrasyonu gerekir — aşağıdaki butonla "
     "buradan açabilirsiniz) → 'Kare Yakala' ile kareleri galeriye ekleyin (Yakalananlar "
@@ -130,15 +127,14 @@ class HeightScaleCalibrationDialog(QDialog):
         self._model = HeightScaleModel()
         self._frame_provider = frame_provider
         self._lens_profile_provider = lens_profile_provider or (lambda: None)
-        self._open_lens_calibration = open_lens_calibration
         self._calibration_dir = calibration_dir if calibration_dir is not None else calibration_store.DEFAULT_CALIBRATION_DIR
+        self._open_lens_calibration = open_lens_calibration
         self._pending_pixel_distance: float | None = None
         self._captured_frame: np.ndarray | None = None
         self._gallery_frames: list[np.ndarray] = []
-        """Bu oturumda yakalanan/sürüklenen TÜM kareler — eskiden tek bir `_captured_frame`
-        vardı ve her yakalama öncekinin üzerine yazıyordu; artık hepsi biriktirilir ki farklı
-        yüksekliklerdeki kareler tek tek (ya da toplu) işlenebilsin."""
-        self._active_gallery_index: int | None = None
+        """`_gallery_list`'teki her küçük resme karşılık gelen tam-çözünürlük görüntü,
+        sırasıyla -- galeri sadece bir ÖNİZLEME değil, "Seçili Karelerde Tahtayı Algıla"nın
+        işlediği gerçek veri kaynağıdır."""
 
         self._canvas = MeasureCanvas()
         self._canvas.set_editing_enabled(True)
@@ -149,16 +145,24 @@ class HeightScaleCalibrationDialog(QDialog):
         capture_button = QPushButton("Kare Yakala")
         capture_button.clicked.connect(self._on_capture_frame)
 
-        # -- yakalanan kareler galerisi (biriktirme + toplu işaretleme) --
         self._gallery_list = CaptureDropListWidget()
         self._gallery_list.setViewMode(QListWidget.ViewMode.IconMode)
         self._gallery_list.setIconSize(QPixmap(_THUMB_SIZE, _THUMB_SIZE).size())
         self._gallery_list.setResizeMode(QListWidget.ResizeMode.Adjust)
-        self._gallery_list.setMaximumHeight(_THUMB_SIZE + 60)
+        self._gallery_list.setFixedHeight(_THUMB_SIZE + 48)
+        self._gallery_list.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
         self._gallery_list.itemClicked.connect(self._on_gallery_item_clicked)
         self._gallery_list.files_dropped.connect(self._on_gallery_files_dropped)
-
+        gallery_label = QLabel(
+            "Yakalanan kareler (bir küçük resme tıklayarak canvas'ta aktif/referans yapın; "
+            "işaretli olanlar 'Seçili Karelerde Tahtayı Algıla' ile TOPLU işlenir — "
+            "Yakalananlar panelinden buraya sürükleyip bırakabilirsiniz):"
+        )
         detect_batch_button = QPushButton("Seçili Karelerde Tahtayı Algıla")
+        detect_batch_button.setToolTip(
+            "Galeride işaretli (checkbox açık) TÜM kareler üzerinde geçerli tahta türü/kamera "
+            "montajı ayarlarıyla tahta algılamayı çalıştırır ve her başarılı karede bir nokta ekler."
+        )
         detect_batch_button.clicked.connect(self._on_detect_board_batch)
 
         self._mount_vertical_radio = QRadioButton(_MOUNT_VERTICAL)
@@ -168,15 +172,13 @@ class HeightScaleCalibrationDialog(QDialog):
         mount_group.addButton(self._mount_vertical_radio)
         mount_group.addButton(self._mount_angled_radio)
         self._mount_vertical_radio.toggled.connect(self._update_height_label)
-        self._mount_vertical_radio.toggled.connect(self._refresh_angled_warning)
-
-        self._angled_warning_label = QLabel("")
-        self._angled_warning_label.setWordWrap(True)
-        self._angled_warning_label.setStyleSheet("color: #b00; font-weight: bold;")
 
         self._open_lens_button = QPushButton("Lens Kalibrasyonunu Aç...")
-        self._open_lens_button.clicked.connect(self._on_open_lens_calibration_clicked)
         self._open_lens_button.setVisible(open_lens_calibration is not None)
+        self._open_lens_button.clicked.connect(self._on_open_lens_calibration_clicked)
+        self._angled_warning_label = QLabel("")
+        self._angled_warning_label.setWordWrap(True)
+        self._angled_warning_label.setStyleSheet("color: #cc6600;")
 
         self._height_label = QLabel("Yükseklik (mm):")
         self._height_spin = QDoubleSpinBox()
@@ -266,6 +268,7 @@ class HeightScaleCalibrationDialog(QDialog):
         mount_row.addWidget(QLabel("Kamera Montajı:"))
         mount_row.addWidget(self._mount_vertical_radio)
         mount_row.addWidget(self._mount_angled_radio)
+        mount_row.addWidget(self._open_lens_button)
         mount_row.addStretch(1)
 
         form_row = QHBoxLayout()
@@ -301,12 +304,11 @@ class HeightScaleCalibrationDialog(QDialog):
         layout.addWidget(guide_label)
         layout.addWidget(self._canvas, 1)
         layout.addWidget(capture_button)
-        layout.addWidget(QLabel("Yakalanan Kareler (tıkla = aktif yap, kutucuk = toplu işleme dahil et):"))
+        layout.addWidget(gallery_label)
         layout.addWidget(self._gallery_list)
         layout.addWidget(detect_batch_button)
         layout.addLayout(mount_row)
         layout.addWidget(self._angled_warning_label)
-        layout.addWidget(self._open_lens_button)
         layout.addLayout(form_row)
         layout.addWidget(self._pixel_label)
         layout.addWidget(self._add_point_button)
@@ -340,6 +342,29 @@ class HeightScaleCalibrationDialog(QDialog):
             self._height_label.setText("Yükseklik (mm):")
         else:
             self._height_label.setText("Kameradan Mesafe (mm):")
+        self._update_angled_warning()
+
+    def _update_angled_warning(self) -> None:
+        """"Açılı" montaj `solvePnP` için lens kalibrasyonu (intrinsics) GEREKTİRİR --
+        eksikse `_detect_board_for_frame` sessizce (küçük bir durum etiketinde) reddediyordu
+        ve kullanıcı nedenini anlamıyordu (gerçek kullanıcı raporu). Artık montaj seçilir
+        seçilmez VE pencere her gösterildiğinde (bkz. `showEvent`, kullanıcı araya girip Lens
+        Kalibrasyonu'nu tamamlamış olabilir) bu kalıcı uyarı güncellenir."""
+        if self._mount_angled_radio.isChecked() and self._lens_profile_provider() is None:
+            self._angled_warning_label.setText(
+                "Açılı montaj seçili ama henüz Lens Kalibrasyonu yapılmamış — 'Tahtayı Algıla' "
+                "nokta EKLEMEYECEK. Önce Lens Kalibrasyonu'nu tamamlayın (aşağıdaki butonla açabilirsiniz)."
+            )
+        else:
+            self._angled_warning_label.setText("")
+
+    def showEvent(self, event) -> None:  # noqa: N802 - Qt override
+        super().showEvent(event)
+        self._update_angled_warning()
+
+    def _on_open_lens_calibration_clicked(self) -> None:
+        if self._open_lens_calibration is not None:
+            self._open_lens_calibration()
 
     def _on_board_type_changed(self, _checked: bool) -> None:
         self._checkerboard_widget.setVisible(self._board_checkerboard_radio.isChecked())
@@ -358,7 +383,9 @@ class HeightScaleCalibrationDialog(QDialog):
         frame = self._frame_provider()
         if frame is None:
             return
-        self._use_frame(frame)
+        self._use_frame(frame, persist=False)
+        index = self._add_capture_to_gallery(frame)
+        self._mark_active_gallery_item(index)
 
     def _on_frame_file_dropped(self, path: str) -> None:
         """Yakalananlar galerisinden (ya da herhangi bir yerel dosyadan) canvas'a sürükleyip
@@ -369,40 +396,48 @@ class HeightScaleCalibrationDialog(QDialog):
         except FileNotFoundError as exc:
             self._board_status_label.setText(f"Görüntü yüklenemedi: {exc}")
             return
-        self._use_frame(frame)
+        self._use_frame(frame, persist=False)
+        index = self._add_capture_to_gallery(frame)
+        self._mark_active_gallery_item(index)
 
     def _on_gallery_files_dropped(self, paths: list[str]) -> None:
-        """Yakalananlar panelinden bu galeriye sürüklenen kareler — gerçek kullanıcı isteği:
-        "yandaki daha önceden yakaladığım kareleri de kullanabilmeliyim". `capture_store`'a
-        TEKRAR kaydedilmezler (zaten oradan geliyorlar), sadece bu oturumun galerisine
-        eklenirler."""
+        """Yakalananlar galerisinden (yan panel) ya da herhangi bir yerel dosyadan doğrudan
+        `_gallery_list`'e sürükleyip bırakılan kareleri EKLER (üzerine yazmaz) -- gerçek
+        kullanıcı isteği: "yandaki (Yakalananlar panelindeki) kareleri de kullanabilmeliyim"."""
+        last_index: int | None = None
         for path in paths:
             try:
                 frame = load_image(path)
             except FileNotFoundError as exc:
                 self._board_status_label.setText(f"Görüntü yüklenemedi: {exc}")
                 continue
-            self._add_to_gallery(frame)
+            last_index = self._add_capture_to_gallery(frame)
+        if last_index is not None:
+            self._use_frame(self._gallery_frames[last_index], persist=False)
+            self._mark_active_gallery_item(last_index)
 
-    def _use_frame(self, frame: np.ndarray) -> None:
-        """Yeni YAKALANAN bir kare: galeriye eklenir, aktif yapılır ve depoya kaydedilir."""
-        self._add_to_gallery(frame)
+    def _on_gallery_item_clicked(self, item: QListWidgetItem) -> None:
+        index = item.data(_GALLERY_INDEX_ROLE)
+        if index is None or index >= len(self._gallery_frames):
+            return
+        self._use_frame(self._gallery_frames[index], persist=False)
+        self._mark_active_gallery_item(index)
+
+    def _add_capture_to_gallery(self, frame: np.ndarray) -> int:
+        index = len(self._gallery_frames)
+        self._gallery_frames.append(frame)
+        item = QListWidgetItem(f"#{index + 1}")
+        item.setData(_GALLERY_INDEX_ROLE, index)
+        item.setIcon(QIcon(self._gallery_thumbnail(frame)))
+        item.setFlags(item.flags() | Qt.ItemFlag.ItemIsUserCheckable)
+        item.setCheckState(Qt.CheckState.Checked)
+        self._gallery_list.addItem(item)
         capture_store.save_capture(frame, source="height_scale")
         self.frame_captured.emit()
+        return index
 
-    def _add_to_gallery(self, frame: np.ndarray) -> None:
-        self._gallery_frames.append(frame)
-        item = QListWidgetItem()
-        item.setFlags(item.flags() | Qt.ItemFlag.ItemIsUserCheckable)
-        item.setCheckState(Qt.CheckState.Checked)  # varsayılan: toplu işlemeye DAHİL
-        item.setData(_GALLERY_INDEX_ROLE, len(self._gallery_frames) - 1)
-        item.setIcon(QIcon(self._thumbnail(frame)))
-        self._gallery_list.addItem(item)
-        self._activate_gallery_index(len(self._gallery_frames) - 1)
-
-    @staticmethod
-    def _thumbnail(frame: np.ndarray) -> QPixmap:
-        qimage = numpy_to_qimage(normalize_to_uint8(frame))
+    def _gallery_thumbnail(self, image: np.ndarray) -> QPixmap:
+        qimage = numpy_to_qimage(normalize_to_uint8(image))
         return QPixmap.fromImage(qimage).scaled(
             _THUMB_SIZE,
             _THUMB_SIZE,
@@ -410,34 +445,26 @@ class HeightScaleCalibrationDialog(QDialog):
             Qt.TransformationMode.SmoothTransformation,
         )
 
-    def _on_gallery_item_clicked(self, item: QListWidgetItem) -> None:
-        self._activate_gallery_index(self._gallery_list.row(item))
-
-    def _activate_gallery_index(self, index: int) -> None:
-        """Galerideki `index`'li kareyi AKTİF (canvas'ta gösterilen, elle nokta eklenen ve
-        tekil 'Tahtayı Algıla'nın kullandığı) kare yapar."""
-        if not 0 <= index < len(self._gallery_frames):
-            return
-        self._active_gallery_index = index
-        self._show_frame(self._gallery_frames[index])
-        self._refresh_gallery_labels()
-
-    def _refresh_gallery_labels(self) -> None:
-        """Aktif kare yıldızla işaretlenir ("★ #2"), diğerleri sade numaralıdır ("#1")."""
-        for row in range(self._gallery_list.count()):
-            prefix = "★ " if row == self._active_gallery_index else ""
-            self._gallery_list.item(row).setText(f"{prefix}#{row + 1}")
+    def _mark_active_gallery_item(self, active_index: int) -> None:
+        """Galeride TEK bir küçük resmi ('★' öneki ile) aktif/referans olarak işaretler --
+        `ShapeMatchingDialog._activate_reference`/`LensCalibrationDialog`'daki '★ REFERANS'
+        deseniyle AYNI: birden fazla foto arasında hangisinin canvas'ta gösterildiği/hangi
+        pozdan nokta ekleneceği belirsiz kalmasın diye."""
+        for i in range(self._gallery_list.count()):
+            item = self._gallery_list.item(i)
+            idx = item.data(_GALLERY_INDEX_ROLE)
+            prefix = "★ " if idx == active_index else ""
+            item.setText(f"{prefix}#{idx + 1}")
 
     def _checked_gallery_frames(self) -> list[np.ndarray]:
-        return [
-            frame
-            for row, frame in enumerate(self._gallery_frames)
-            if self._gallery_list.item(row).checkState() == Qt.CheckState.Checked
-        ]
+        frames = []
+        for i in range(self._gallery_list.count()):
+            item = self._gallery_list.item(i)
+            if item.checkState() == Qt.CheckState.Checked:
+                frames.append(self._gallery_frames[item.data(_GALLERY_INDEX_ROLE)])
+        return frames
 
-    def _show_frame(self, frame: np.ndarray) -> None:
-        """Bir kareyi canvas'a koyup ölçüm durumunu sıfırlar — hem yeni yakalamada hem de
-        galeriden var olan bir kareyi seçmede kullanılır (ikincisi depoya YAZMAZ)."""
+    def _use_frame(self, frame: np.ndarray, persist: bool = True) -> None:
         self._captured_frame = frame
         self._canvas.set_image(frame)
         self._canvas.clear_points()
@@ -445,20 +472,9 @@ class HeightScaleCalibrationDialog(QDialog):
         self._add_point_button.setEnabled(False)
         self._pixel_label.setText("Piksel mesafesi: -")
         self._board_status_label.setText("")
-
-    def _refresh_angled_warning(self) -> None:
-        """Açılı montaj SEÇİLİ ama lens profili YOKSA kalıcı uyarı gösterir. Lens Kalibrasyonu
-        araya girip tamamlanmış olabileceğinden `showEvent`'te de yeniden değerlendirilir."""
-        needs_warning = self._mount_angled_radio.isChecked() and self._lens_profile_provider() is None
-        self._angled_warning_label.setText(_ANGLED_WARNING_TEXT if needs_warning else "")
-
-    def _on_open_lens_calibration_clicked(self) -> None:
-        if self._open_lens_calibration is not None:
-            self._open_lens_calibration()
-
-    def showEvent(self, event) -> None:  # noqa: N802 - Qt override
-        super().showEvent(event)
-        self._refresh_angled_warning()
+        if persist:
+            capture_store.save_capture(frame, source="height_scale")
+            self.frame_captured.emit()
 
     def _on_measurement_made(self, _x1: float, _y1: float, _x2: float, _y2: float, pixel_distance: float) -> None:
         self._pending_pixel_distance = pixel_distance

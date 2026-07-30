@@ -31,12 +31,14 @@ class ConnectedComponentsOp:
             ParamType.ENUM,
             default="white",
             choices=["white", "black", "both"],
-            label="Nesne Polaritesi",
-            help="Hangi bölgelerin 'nesne' sayılacağı: 'white' = açık/beyaz bölgeler "
-            "(varsayılan), 'black' = koyu/siyah bölgeler (ör. açık bir bant üzerindeki koyu "
-            "ürünler), 'both' = ikisi de AYRI bileşenler olarak etiketlenir (hiçbir piksel "
-            "arka plan kalmaz). Aksi halde koyu ürünleri ölçmek için önce Eşikleme'yi ters "
-            "çevirmek gerekirdi.",
+            label="Ölçülecek Bölge",
+            help="'Beyaz' (varsayılan, eski davranış): sadece eşiklemeden sonra parlak kalan "
+            "bölgeler etiketlenir. 'Siyah': sadece koyu kalan bölgeler etiketlenir. 'Her İkisi': "
+            "hem parlak hem koyu bölgeler AYRI etiketlerle (koyu bölgeler parlak "
+            "bölgelerinkinden sonra gelen numaralarla) tek haritada birlikte döner. Siyah-Beyaz "
+            "filtrede tersini alınca gölge/aydınlatma kaynaklı bozukluklarda hangi tarafın "
+            "gerçek ürün olduğu değişebiliyorsa bu seçenekle yeniden Eşikleme/Ters Çevirme "
+            "eklemeden düzeltilebilir.",
         ),
         ParamSpec(
             "max_area_ratio",
@@ -54,8 +56,8 @@ class ConnectedComponentsOp:
 
     def run(self, inputs: dict[str, Any], params: dict[str, Any]) -> dict[str, Any]:
         connectivity = int(params.get("connectivity", "8"))
-        polarity = str(params.get("polarity", "white"))
         max_area_ratio = float(params.get("max_area_ratio", 0.0))
+        polarity = params.get("polarity", "white")
         image = inputs["image"]
         gray = image if image.ndim == 2 else cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
 
@@ -73,22 +75,22 @@ class ConnectedComponentsOp:
         else:
             _, binary = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
 
-        if polarity == "black":
-            binary = cv2.bitwise_not(binary)
-
         if polarity == "both":
-            # Açık VE koyu bölgeler ayrı ayrı etiketlenir; koyu etiketler beyazlarınkiyle
-            # ÇAKIŞMASIN diye kaydırılır, böylece her bölge benzersiz bir kimlik alır ve
-            # görüntüde arka plan (0) kalan piksel olmaz.
+            # İki bağımsız `connectedComponents` çağrısı (biri parlak taraf, biri koyu taraf
+            # `bitwise_not` ile) sonra TEK bir haritada birleştirilir. `labels_black` sadece
+            # `binary`'nin 0 olduğu (yani `labels_white`'ın da 0/arka plan olduğu) piksellerde
+            # sıfırdan farklı olduğundan iki harita KESİŞMEZ -- basit toplama yeterli, hücre
+            # bazlı öncelik/üzerine yazma mantığı gerekmez.
             num_white, labels_white = cv2.connectedComponents(binary, connectivity=connectivity)
             num_black, labels_black = cv2.connectedComponents(
                 cv2.bitwise_not(binary), connectivity=connectivity
             )
-            shifted_black = np.where(labels_black > 0, labels_black + (num_white - 1), 0)
-            labels = np.where(labels_white > 0, labels_white, shifted_black)
-            num_labels = (num_white - 1) + (num_black - 1) + 1
+            offset = num_white - 1
+            labels = labels_white + np.where(labels_black > 0, labels_black + offset, 0)
+            num_labels = num_white + num_black - 1
         else:
-            num_labels, labels = cv2.connectedComponents(binary, connectivity=connectivity)
+            source = cv2.bitwise_not(binary) if polarity == "black" else binary
+            num_labels, labels = cv2.connectedComponents(source, connectivity=connectivity)
 
         excluded = 0
         if max_area_ratio > 0:

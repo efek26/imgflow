@@ -1492,7 +1492,11 @@ class MainWindow(QMainWindow):
         geçişlerinden TAMAMEN bağımsız kalır, kullanıcı SADECE bölme sınırını elle
         sürükleyerek boyutları değiştirebilir."""
         sizes = self.central_splitter.sizes()
-        QTimer.singleShot(0, lambda: self.central_splitter.setSizes(sizes))
+        # `self` BAĞLAM nesnesi olarak verilir: pencere bu 0ms'lik tur dolmadan yok edilirse
+        # (ör. testlerde pencere hemen kapatılır) Qt bekleyen çağrıyı sessizce iptal eder.
+        # Bağlamsız hâlinde lambda ölü bir pencereye ulaşıp "Slot 'MainWindow::' not found"
+        # hatası üretiyordu.
+        QTimer.singleShot(0, self, lambda: self.central_splitter.setSizes(sizes))
 
     # -- yardımcılar ----------------------------------------------------
 

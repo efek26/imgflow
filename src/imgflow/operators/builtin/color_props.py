@@ -13,16 +13,34 @@ varsa her biri numaralanıp kendi L*a*b* değerleriyle listelenir. Kapalıyken (
 eski davranış) tüm görüntü tek bir ölçüm satırı olarak değerlendirilir; tek bir ürüne
 odaklanmak isteyen kullanıcı bu operatörden ÖNCE bir `roi.region` adımı da ekleyebilir.
 
+**Dalgalanma/Aralık (min/max):** hem Otomatik Nesne Tespiti hem Elle ROI Çiz modu, ortalama/
+std'ye EK olarak her kanal için min/max (`l_min/l_max`, `a_min/a_max`, `b_min/b_max`) hesaplar
+-- gerçek kullanıcı isteği: "roi içindeki / nesne tespitindeki renk dalgalanmalarını aralık
+olarak versin" (tek bir ortalama değer parlama/gölge kaynaklı renk dalgalanmasını gizleyebilir).
+Bu, HALCON'un `min_max_gray(Regions, Image, Percent, Min, Max, Range)` operatörünün bir bölge
+üzerindeki Min/Max/Range çıktısına karşılık gelir -- `l_mean`/`l_std` zaten HALCON'un
+`intensity` (Mean, Deviation) çıktısına karşılık geliyordu, bu ikisi birlikte HALCON'daki
+tipik "bölge parlaklık/renk istatistiği" ikilisini (ortalama+dağılım, min-max aralığı)
+tamamlıyor. Tüm-görüntü (varsayılan, tespit/ROI kapalı) modu BİLEREK min/max hesaplamaz --
+tek bir ürünün İÇİNDEKİ dalgalanma değil, kalibrasyon/referans amaçlı tek bir özet değer
+istendiği varsayılır; min/max isteyen kullanıcı Otomatik Nesne Tespiti ya da Elle ROI Çiz'i
+açabilir.
+
 **Elle ROI Çiz (`manual_roi_enabled`)** üçüncü bir mod: Otomatik Nesne Tespiti'nin (Otsu/
 manuel eşik ne kadar ayarlanırsa ayarlansın) her sahneyi ayıramadığı gerçek kullanıcı
 geri bildirimi üzerine eklendi -- kullanıcı `RoiCanvas` üzerinde fare ile istediği kadar
 dikdörtgen çizer (bkz. `ui/widgets/roi_canvas.py` multi-mode, `ui/main_window.py`
 `_on_manual_rois_canvas_changed`), her biri `manual_rois` parametresinde JSON liste olarak
 saklanır (`core/roi.py::parse_roi_list`) ve HER biri için ayrı ölçüm üretilir; tespit
-algoritması tamamen devre dışıdır. Bu modda ayrıca her kanal için min/max (`l_min/l_max`
-vb.) de hesaplanıp "aralık" olarak eklenir -- gerçek kullanıcı isteği: "roi içindeki renk
-dalgalanmalarını aralık olarak versin" (ortalama tek başına parlama/gölge kaynaklı renk
-dalgalanmasını gizleyebilir).
+algoritması tamamen devre dışıdır.
+
+**Performans:** `run()` artık görüntünün TAMAMINI baştan LAB'a çevirmiyor -- her dal SADECE
+ihtiyacı olan bölgeyi (tüm-görüntü modunda tüm kare, aksi halde SADECE her ROI/nesnenin bbox
+kırpımı) dönüştürür, ve tüm-görüntü modundaki ortalama/std `cv2.meanStdDev` ile TEK bir
+C-seviyesi çağrıda hesaplanır (eski `lab[..., i].mean()/.std()` kanal-ekseninde strided bir
+görünüm üzerinde 6 ayrı numpy geçişiydi, 1920x1080'de ölçülen ~17x daha yavaştı). Canlı kamera
+akışında bu operatör seçiliyken tek kare işleme süresini gözle görülür şekilde kısaltıyor;
+küçük ROI'lerle çalışırken tam-çözünürlüklü dönüşüm zaten hiç gerekmiyordu.
 
 ΔE76 (basit Öklid mesafesi, `sqrt(dL²+da²+db²)`) tercih edildi — ΔE2000 çok daha karmaşık
 bir ağırlıklandırma formülü gerektirir ve endüstriyel "referans renkten ne kadar saptı"
@@ -285,7 +303,11 @@ class ColorPropsOp:
 
     def run(self, inputs: dict[str, Any], params: dict[str, Any]) -> dict[str, Any]:
         image = inputs["image"]
-        lab = _to_lab(image)
+        # `lab = _to_lab(image)` tüm görüntüyü ÖNCEDEN dönüştürmek yerine her dal SADECE
+        # ihtiyacı olan bölgeyi (ROI/nesne kırpımı ya da tüm görüntü) dönüştürür -- bir
+        # 1920x1080 karede tam-çözünürlüklü BGR->LAB dönüşümü ~12-14ms sürüyor, ama birkaç
+        # küçük ROI/nesneyle çalışırken bu maliyetin neredeyse tamamı gereksizdi (bkz. FAZ
+        # sonrası performans notu, aşağıdaki dallar).
         tolerance_enabled = bool(params.get("tolerance_enabled", False))
         ref_l = float(params.get("ref_l", 50.0))
         ref_a = float(params.get("ref_a", 0.0))
@@ -311,11 +333,13 @@ class ColorPropsOp:
             )
             measurements = []
             for index, roi in enumerate(rois, start=1):
-                crop = lab[roi.y : roi.y + roi.h, roi.x : roi.x + roi.w]
-                if crop.size == 0:
+                bgr_crop = image[roi.y : roi.y + roi.h, roi.x : roi.x + roi.w]
+                if bgr_crop.size == 0:
                     continue
-                l_mean, a_mean, b_mean = (float(crop[..., i].mean()) for i in range(3))
-                l_std, a_std, b_std = (float(crop[..., i].std()) for i in range(3))
+                crop = _to_lab(bgr_crop)
+                mean, std = cv2.meanStdDev(crop)
+                l_mean, a_mean, b_mean = (float(v) for v in mean.ravel())
+                l_std, a_std, b_std = (float(v) for v in std.ravel())
                 measurement = {
                     "label": index,
                     "manual": True,
@@ -353,7 +377,8 @@ class ColorPropsOp:
             )
             measurements: list[dict[str, Any]] = []
             for obj in objects:
-                crop = lab[obj.y : obj.y + obj.h, obj.x : obj.x + obj.w]
+                bgr_crop = image[obj.y : obj.y + obj.h, obj.x : obj.x + obj.w]
+                crop = _to_lab(bgr_crop)
                 pixels = crop[obj.mask]
                 if pixels.size == 0:
                     continue
@@ -368,9 +393,10 @@ class ColorPropsOp:
                     "a_std": a_std,
                     "b_std": b_std,
                     # Gerçek kullanıcı isteği: "lab analizi yaparken nesne tespitinde
-                    # dalgalanma gözüksün" -- Elle ROI Çiz'deki min/max aralığı burada da
-                    # verilir; tek bir ortalama, nesne İÇİNDEKİ parlama/gölge kaynaklı renk
-                    # dalgalanmasını gizler.
+                    # dalgalanma gözüksün" -- Elle ROI Çiz modundaki AYNI min/max ARALIK
+                    # alanları (HALCON'un `min_max_gray`'inin Range çıktısına karşılık gelir)
+                    # artık Otomatik Nesne Tespiti'nde de hesaplanıyor; ortalama tek başına
+                    # parlama/gölge kaynaklı renk dalgalanmasını gizleyebiliyordu.
                     "l_min": float(pixels[:, 0].min()),
                     "l_max": float(pixels[:, 0].max()),
                     "a_min": float(pixels[:, 1].min()),
@@ -387,8 +413,15 @@ class ColorPropsOp:
             overlay = render_color_overlay_multi(image, measurements)
             return {"measurements": measurements, "overlay": overlay}
 
-        l_mean, a_mean, b_mean = (float(lab[..., i].mean()) for i in range(3))
-        l_std, a_std, b_std = (float(lab[..., i].std()) for i in range(3))
+        lab = _to_lab(image)
+        # `cv2.meanStdDev` TEK bir C-seviyesi çağrıyla üç kanalın ortalama/std'sini birden
+        # hesaplıyor; eski `lab[..., i].mean()/.std()` (kanal ekseninde STRIDED bir görünüm
+        # üzerinde 6 ayrı numpy indirgeme geçişi) 1920x1080'de ölçülen ~17x daha yavaştı --
+        # canlı kamera akışında bu operatör seçiliyken tek karelik bekleme süresinin önemli
+        # bir kısmını oluşturuyordu.
+        mean, std = cv2.meanStdDev(lab)
+        l_mean, a_mean, b_mean = (float(v) for v in mean.ravel())
+        l_std, a_std, b_std = (float(v) for v in std.ravel())
         measurement = {
             "l_mean": l_mean,
             "a_mean": a_mean,

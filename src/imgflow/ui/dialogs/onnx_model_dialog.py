@@ -6,10 +6,10 @@ model türünü + giriş boyutunu + sınıf isimlerini belirtip isimle kaydeder
 `model_names` parametresiyle kullanır. `ShapeMatchingDialog`/`FlatFieldDialog`'daki isimli-
 profil deseninin (seç → meta bilgi gir → Kaydet; Sil ile yönetim) aynısı.
 
-**Model Türü** seçeneklerinden şu an SADECE "YOLO" çalıştırılabilir; "Sınıflandırma"/
-"Segmentasyon" de kaydedilebilir (gelecek fazlar için yer tutucu, bkz.
-`io_utils/onnx_model_store.py` modül docstring'i) ama `ml.onnx_detect` operatörü bu
-türdeki bir modelle çalıştırılırsa net bir "henüz desteklenmiyor" hatası verir.
+**Model Türü**: "YOLO" (nesne tespiti/kutu), "Sınıflandırma / Anomali" (tüm görüntüye tek
+etiket, kutu yok) ve "Segmentasyon" (piksel-başına sınıf haritası, `class_id=0` arka plan
+varsayılır) — ÜÇÜ de `ml.onnx_detect` operatöründe çalıştırılabilir (bkz.
+`io_utils/onnx_model_store.py` modül docstring'i).
 """
 
 from __future__ import annotations
@@ -31,14 +31,17 @@ from PySide6.QtWidgets import (
     QVBoxLayout,
 )
 
-from imgflow.core.onnx_detection import inspect_onnx_model
+from imgflow.core import onnx_detection
 from imgflow.io_utils import onnx_model_store
 
 _GUIDE_TEXT = (
-    "imgflow DIŞINDA (ör. Ultralytics YOLO ile) eğitilmiş bir '.onnx' dosyası seçin — sınıf "
-    "isimleri ve giriş boyutu, modelin kendi metadata'sından OTOMATİK doldurulur (okunamazsa "
-    "elle girersiniz) — model türünü seçip 'Kaydet'. Pipeline'da 'Yapay Zeka (ONNX)' "
-    "kategorisindeki operatörde bu isim 'Model(ler)' açılır listesinden seçilebilir."
+    "imgflow DIŞINDA (ör. Ultralytics YOLO ile) eğitilmiş bir '.onnx' dosyası seçin -- "
+    "sınıf isimleri/giriş boyutu modelden okunabiliyorsa otomatik doldurulur (gerekirse "
+    "düzenleyin), okunamıyorsa elle girip 'Kaydet'. Pipeline'da 'Yapay Zeka (ONNX)' "
+    "kategorisindeki operatörde bu isim 'Model(ler)' açılır listesinden seçilebilir. Model "
+    "Türü: YOLO=nesne tespiti (kutu), Sınıflandırma/Anomali=tüm görüntüye tek etiket (kutu "
+    "yok), Segmentasyon=piksel-başına sınıf haritası (sınıf isimlerinde 0. sıradaki her "
+    "zaman arka plan sayılır -- ör. 'arka_plan, kusur, saglam')."
 )
 _TASK_TYPE_LABELS = {
     onnx_model_store.TASK_TYPE_YOLO: "YOLO",
@@ -130,15 +133,8 @@ class OnnxModelDialog(QDialog):
         self._selected_onnx_path = Path(path)
         self._path_label.setText(path)
         self._save_button.setEnabled(True)
-        self._autofill_from_model(self._selected_onnx_path)
 
-    def _autofill_from_model(self, path: Path) -> None:
-        """Sınıf isimlerini ve giriş boyutunu modelin KENDİ metadata'sından doldurur — böylece
-        kullanıcı virgüllü listeyi elle yeniden yazmaz ve SIRA uyuşmazlığından doğan sessiz
-        yanlış etiketleme (gerçek kullanıcı şikayeti: "sınıflandırmalar bozuk/hatalı gibi
-        geliyor") olmaz. Okunamayan/bozuk dosyada (bkz. `inspect_onnx_model` ASLA fırlatmaz)
-        alanlar DEĞİŞMEDEN bırakılır ve kullanıcı elle girmeye yönlendirilir."""
-        info = inspect_onnx_model(path)
+        info = onnx_detection.inspect_onnx_model(self._selected_onnx_path)
         filled = []
         if info["class_labels"]:
             self._class_labels_edit.setText(", ".join(info["class_labels"]))
@@ -148,11 +144,9 @@ class OnnxModelDialog(QDialog):
             filled.append("giriş boyutu")
 
         if filled:
-            self._status_label.setText(f"Modelden otomatik okundu: {' ve '.join(filled)}.")
+            self._status_label.setText(f"Modelden otomatik algılandı: {', '.join(filled)}. Gerekirse düzenleyin.")
         else:
-            self._status_label.setText(
-                "Model metadata'sı okunamadı — sınıf isimlerini ve giriş boyutunu elle girin."
-            )
+            self._status_label.setText("Modelden otomatik bilgi okunamadı — sınıf isimlerini/giriş boyutunu elle girin.")
 
     def _on_save(self) -> None:
         if self._selected_onnx_path is None:

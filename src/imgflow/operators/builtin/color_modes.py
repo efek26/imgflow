@@ -231,7 +231,10 @@ class HsvOp:
             ParamType.BOOL,
             default=False,
             label="Renk Aralığı Maskesi",
-            help="Sadece aşağıdaki H/S/V aralığındaki pikselleri KENDİ RENGİYLE bırakır, geri kalanını siyaha boyar; belirli bir renkteki nesneyi (ör. yeşil etiket) ayıklamak için kullanılır. Çıktı renkli (3 kanallı) kalır.",
+            help="Sadece aşağıdaki H/S/V aralığındaki pikselleri ORİJİNAL renkleriyle bırakır, "
+            "aralık dışındakileri siyah yapar; belirli bir renkteki nesneyi (ör. yeşil etiket) "
+            "ayıklamak için kullanılır. Görüntü RENKLİ kalır (gri/siyah-beyaza dönüşmez) — "
+            "sadece aralık dışı pikseller siyaha boyanır.",
         ),
         ParamSpec(
             "h_min", ParamType.INT, default=0, min=0, max=179, label="H Min", help="Renk tonu alt sınırı (0-179)."
@@ -262,6 +265,8 @@ class HsvOp:
             v = cv2.equalizeHist(v)
             hsv = cv2.merge([h, s, v])
 
+        corrected_bgr = cv2.cvtColor(hsv, cv2.COLOR_HSV2BGR)
+
         if params.get("apply_mask", False):
             lower = np.array(
                 [params.get("h_min", 0), params.get("s_min", 0), params.get("v_min", 0)], dtype=np.uint8
@@ -272,11 +277,10 @@ class HsvOp:
             )
             mask = cv2.inRange(hsv, lower, upper)
             # Gerçek kullanıcı raporu: "hsv filtresi otomatik siyah beyaza çeviriyor
-            # çevirmemesi lazım" -- eskiden ham `inRange` sonucu (tek kanallı 0/255 ikili
-            # görüntü) döndürülüyordu, yani filtre HER ZAMAN görüntüyü siyah/beyaza
-            # çeviriyordu. Artık aralık İÇİNDEKİ pikseller ORİJİNAL rengiyle korunur, sadece
-            # aralık DIŞINDAKİLER siyaha boyanır -- çıktı her zaman 3 kanallı (renkli) kalır.
-            bgr = cv2.cvtColor(hsv, cv2.COLOR_HSV2BGR)
-            return {"image": cv2.bitwise_and(bgr, bgr, mask=mask)}
+            # çevirmemesi lazım" -- eskiden burada ham `mask` (tek kanallı 0/255 ikili
+            # görüntü) döndürülüyordu, yani aralık maskesi AÇILINCA görüntü koşulsuz olarak
+            # siyah/beyaza dönüyordu. `cv2.bitwise_and` ile SADECE aralık DIŞINDAKİ pikseller
+            # siyaha boyanır, aralık İÇİNDEKİ pikseller (dolayısıyla görüntünün RENGİ) korunur.
+            return {"image": cv2.bitwise_and(corrected_bgr, corrected_bgr, mask=mask)}
 
-        return {"image": cv2.cvtColor(hsv, cv2.COLOR_HSV2BGR)}
+        return {"image": corrected_bgr}
