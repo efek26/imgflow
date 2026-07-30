@@ -25,6 +25,7 @@ from PySide6.QtWidgets import (
     QVBoxLayout,
 )
 
+from imgflow.core import capture_store
 from imgflow.io_utils import flatfield_store
 from imgflow.io_utils.image_io import load_image
 from imgflow.ui.widgets.image_view import ImageView
@@ -38,6 +39,12 @@ _GUIDE_TEXT = (
 
 
 class FlatFieldDialog(QDialog):
+    frame_captured = Signal()
+    """Gerçek kullanıcı isteği: "her işlemde kare yakalayabileyim" -- Ölçüm Aracı/Şekil
+    Eşleştirme/Lens/Yükseklik diyaloglarındaki AYNI desen: o an yüklü referans görüntüsü
+    paylaşılan "Yakalanan Kareler" galerisine (`capture_store`, `source="flat_field"`)
+    eklenir, ana pencere bu sinyali `capture_gallery_panel.refresh`'e bağlar."""
+
     references_changed = Signal(str)
     """Kayıtlı referans KÜMESİ değiştiğinde (kaydet/sil) yayınlanır — ana pencere,
     `correction.flat_field` düğümü seçiliyse parametre panelindeki 'Aydınlatma Referansı'
@@ -63,6 +70,13 @@ class FlatFieldDialog(QDialog):
 
         load_button = QPushButton("Görüntü Yükle...")
         load_button.clicked.connect(self._on_load)
+
+        self._capture_button = QPushButton("Kareyi Galeriye Ekle")
+        self._capture_button.setToolTip(
+            "Yüklenen referans görüntüsünü 'Yakalanan Kareler' galerisine (yan panel) ekler."
+        )
+        self._capture_button.setEnabled(False)
+        self._capture_button.clicked.connect(self._on_capture)
 
         self._name_edit = QLineEdit()
         self._name_edit.setPlaceholderText("Referans adı (ör. hat1_bos_bant)")
@@ -93,7 +107,11 @@ class FlatFieldDialog(QDialog):
         layout = QVBoxLayout(self)
         layout.addWidget(guide_label)
         layout.addWidget(self._view, 1)
-        layout.addWidget(load_button)
+        load_row = QHBoxLayout()
+        load_row.addWidget(load_button, 1)
+        load_row.addWidget(self._capture_button)
+
+        layout.addLayout(load_row)
         layout.addLayout(save_row)
         layout.addWidget(self._status_label)
         layout.addWidget(QLabel("Kayıtlı Referanslar:"))
@@ -121,7 +139,15 @@ class FlatFieldDialog(QDialog):
         self._image = image
         self._view.set_image(image)
         self._save_button.setEnabled(True)
+        self._capture_button.setEnabled(True)
         self._status_label.setText("")
+
+    def _on_capture(self) -> None:
+        if self._image is None:
+            return
+        capture_store.save_capture(self._image, source="flat_field")
+        self._status_label.setText("Kare 'Yakalanan Kareler' galerisine eklendi.")
+        self.frame_captured.emit()
 
     def _on_save(self) -> None:
         if self._image is None:

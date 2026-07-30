@@ -19,7 +19,8 @@ bir ROI'nin içine sürüklemek onu taşır, köşe tutamacı onu yeniden boyutl
 TIKLAMAK siler. Bu iki mod (tekli `set_shape`/çoklu `set_multi_mode`) aynı anda AKTİF
 OLMAZ -- `main_window.py` hangi operatör seçiliyse ona göre birini açar.
 
-`set_contour_preview(excluded_mask)` (SADECE RECT modunda çizilir) -- `ShapeMatchingDialog`'un
+`set_contour_preview(excluded_mask)` (RECT/POLYGON/CIRCLE üç modunda da çizilir) --
+`ShapeMatchingDialog`'un
 "Konturu Otomatik Algıla" checkbox'ı işaretliyken ROI içinde HANGİ piksellerin modelden
 ELENECEĞİNİ (gerçek nesnenin dış hattı DIŞINDaki arka plan) yarı saydam kırmızı bir katmanla
 gösterir -- gerçek kullanıcı raporu: "elediği arka planı göremiyorum, onu da görmek
@@ -73,8 +74,8 @@ class RoiCanvas(ImageView):
         self._polygon_drag_index: int | None = None
         self._contour_preview: np.ndarray | None = None
         """`set_contour_preview` ile beslenir -- GÖRÜNTÜ boyutunda bool dizi, True olan
-        pikseller "Konturu Otomatik Algıla" tarafından elenecek/RECT modunda kırmızı
-        gösterilecek."""
+        pikseller "Konturu Otomatik Algıla" tarafından elenecek/kırmızı gösterilecek
+        (üç çizim modunda da)."""
         self._multi_mode = False
         self._rois: list[tuple[int, int, int, int]] = []
         """Çoklu-ROI modunda GÖRÜNTÜ koordinatındaki dikdörtgenler -- listedeki sıra ROI
@@ -524,6 +525,13 @@ class RoiCanvas(ImageView):
             painter.end()
             return
 
+        # Elenen-alan önizlemesi ÜÇ çizim modunda da (RECT/POLYGON/CIRCLE) ve şeklin ALTINDA
+        # çizilir -- gerçek kullanıcı raporu: "poligon ve çember ROI'nin içinde kontür
+        # bulamıyor" (aslında kontur BULUNUYORDU, sadece yalnızca RECT modunda GÖSTERİLİYORDU,
+        # bu yüzden diğer modlarda hiç geri bildirim olmadığından "bulamıyor" gibi görünüyordu).
+        if self._contour_preview is not None:
+            self._paint_contour_preview(painter)
+
         if self._shape == "POLYGON":
             self._paint_polygon(painter)
             painter.end()
@@ -538,8 +546,6 @@ class RoiCanvas(ImageView):
                 edge = QPoint(center.x() + radius, center.y())
                 painter.fillRect(edge.x() - 4, edge.y() - 4, 8, 8, _ROI_COLOR)
         else:
-            if self._contour_preview is not None:
-                self._paint_contour_preview(painter)
             rect = self._roi_widget_rect()
             if rect is not None:
                 painter.drawRect(rect)

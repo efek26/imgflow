@@ -17,6 +17,32 @@ def test_guide_label_present_and_nonempty(qtbot):
     assert len(labels) == 1
 
 
+def test_capture_button_adds_loaded_reference_to_gallery(qtbot, monkeypatch, tmp_path):
+    """Gerçek kullanıcı isteği: "her işlemde kare yakalayabileyim" -- Ölçüm Aracı/Şekil
+    Eşleştirme/Lens/Yükseklik diyaloglarında zaten olan "Kareyi Galeriye Ekle" butonu
+    Aydınlatma Referansı diyaloğunda EKSİKTİ. `CAPTURE_DIR` mutlaka izole edilmeli (bkz.
+    CLAUDE.md: testler gerçek `~/.imgflow`'a asla dokunmamalı)."""
+    from imgflow.core import capture_store
+
+    monkeypatch.setattr(capture_store, "CAPTURE_DIR", tmp_path / "captures")
+    dialog = FlatFieldDialog(directory=tmp_path, parent=None)
+    qtbot.addWidget(dialog)
+    assert not dialog._capture_button.isEnabled()  # görüntü yokken pasif
+
+    path = tmp_path / "reference.png"
+    cv2.imwrite(str(path), _reference_image())
+    dialog._on_file_dropped(str(path))
+    assert dialog._capture_button.isEnabled()
+
+    emitted = []
+    dialog.frame_captured.connect(lambda: emitted.append(True))
+    dialog._capture_button.click()
+
+    assert len(capture_store.list_captures()) == 1
+    assert capture_store.list_captures()[0].source == "flat_field"
+    assert emitted == [True]
+
+
 def test_save_without_image_is_noop(qtbot, tmp_path):
     dialog = FlatFieldDialog(directory=tmp_path, parent=None)
     qtbot.addWidget(dialog)

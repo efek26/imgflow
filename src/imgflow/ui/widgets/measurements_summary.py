@@ -71,6 +71,12 @@ kullanıcıya gösterilecek açıklamalı Türkçe karşılıkları. Burada olma
 olduğu gibi (değişmeden) gösterilir."""
 
 
+_NEAR_MISS_GAP = 0.15
+"""`geom.shape_match` teşhisinde "kıl payı kaçırdı" sayılan skor farkı. Bunun altındaki bir
+fark genelde kontrast/aydınlatma kaynaklıdır (nesne DOĞRU yerde bulunmuş ama puanı düşük);
+daha büyük farklarda sorun genelde yanlış model/açı aralığı/ölçektir."""
+
+
 def _field_label(key: str) -> str:
     return FIELD_LABELS.get(key, key)
 
@@ -127,6 +133,37 @@ class MeasurementsSummaryPanel(QWidget):
     def set_measurements(self, measurements: list[dict[str, Any]] | None) -> None:
         if not measurements:
             self._label.setText(_EMPTY_TEXT)
+            return
+
+        # `geom.shape_match`'in "eşleşme yok" teşhisi (bkz. o operatörün `run()` sonu). Gerçek
+        # kullanıcı sorunu: hiçbir geri bildirim olmadığı için "Min. Skor" körlemesine
+        # düşürülüyor, bu da düz/boş zeminde yanlış eşleşmelere yol açıyordu ("güven faktörünü
+        # düşürünce başka yerleri seçiyor"). Artık eşiğin ne kadar kıl payı kaçırıldığı ve
+        # elemenin skordan mı doğrulamadan mı geldiği açıkça yazılır.
+        if len(measurements) == 1 and measurements[0].get("no_match"):
+            m = measurements[0]
+            lines = [
+                "Eşleşme yok.",
+                f"En iyi aday skoru: {m['best_score']:.2f}   (Min. Skor: {m['min_score']:.2f})",
+            ]
+            if m.get("verification_rejected"):
+                lines.append(
+                    f"{m['verification_rejected']} aday İç Bölge Doğrulaması'ndan geçemedi "
+                    "(konum doğru ama nesne değil)."
+                )
+            gap = m["min_score"] - m["best_score"]
+            if 0 < gap <= _NEAR_MISS_GAP:
+                lines.append(
+                    "Eşiğe çok yakın: nesnenin kenar kontrastı zayıflamış olabilir. "
+                    "Eşiği düşürmek yerine önce 'Aydınlatma Düzeltme' (Yerel/Dinamik) adımı "
+                    "ekleyin ya da modeli 'Sadece Dış Kontur' ile yeniden eğitin."
+                )
+            elif gap > _NEAR_MISS_GAP:
+                lines.append(
+                    "Eşikten uzak: model/açı aralığı ya da ölçek beklenenden farklı olabilir. "
+                    "'Elenen Adayları Göster' ile adayların nerede oluştuğuna bakın."
+                )
+            self._label.setText("\n".join(lines))
             return
 
         if all("model" in m and "angle" in m for m in measurements):

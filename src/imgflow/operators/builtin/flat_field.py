@@ -92,6 +92,7 @@ class FlatFieldOp:
             "düzleştirilemez ve düzeltilmeden kalır. Ürünün piksel boyutundan büyük bir "
             "değerle başlayıp canlı önizlemeye bakarak ayarlayın. Tek sayıya yuvarlanır "
             "(Gauss çekirdeği tek boyutlu olmalı).",
+            advanced=True,
         ),
         ParamSpec(
             "strength",
@@ -119,6 +120,7 @@ class FlatFieldOp:
             "'görüntü kayboldu' gibi görünür. Bu değer kazancın çarpanını sınırlar (ör. 3 = "
             "bir piksel en fazla 3 kat parlatılır); referans daha DÜZGÜN/az kararan bir "
             "kareyle yeniden kaydedilene kadar geçici bir güvenlik ağıdır.",
+            advanced=True,
         ),
         ParamSpec(
             "mult",
@@ -133,6 +135,7 @@ class FlatFieldOp:
             "çarpan uygular (Sonuç = (Görüntü/Arkaplan)*OtomatikKazanç*Mult + Add). "
             "Varsayılan 1.0 önceki davranışı DEĞİŞTİRMEZ; sonucu genel olarak "
             "karartmak/parlatmak için elle ince ayar yapılabilir.",
+            advanced=True,
         ),
         ParamSpec(
             "add",
@@ -146,6 +149,7 @@ class FlatFieldOp:
             "değeriyle AYNI -- bölme/çarpma işleminden SONRA her piksele sabit bir değer "
             "ekler (ör. sonucu genel olarak biraz parlatmak/koyulaştırmak için). Varsayılan "
             "0.0 önceki davranışı DEĞİŞTİRMEZ.",
+            advanced=True,
         ),
     ]
 

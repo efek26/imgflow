@@ -2429,6 +2429,45 @@ def test_new_shape_match_node_gets_mm_per_px_after_calibration_already_stable(qt
     assert window.graph.nodes[match_id].params["mm_per_px"] == pytest.approx(0.4)
 
 
+def test_undo_does_not_lose_active_calibration(qtbot):
+    """Gerçek kullanıcı raporu: "kalibrasyon ayarı kendi kendine kaybolabiliyor" -- İKİNCİ
+    kayıp yolu: `mm_per_px` düğümün `params`'ında yaşadığı için, kalibrasyondan ÖNCE alınmış
+    bir Geri Al snapshot'ı geri yüklendiğinde alan sessizce eski/boş değerine dönüyordu.
+    Kalibrasyon KAYNAĞI (`_plane_rectification`) bu işlemden hiç etkilenmediğinden, geri
+    yükleme sonrası aktif kalibrasyon düğüme YENİDEN yazılmalı."""
+    window = MainWindow()
+    qtbot.addWidget(window)
+    node_id = window.add_operator("analysis.region_props")  # snapshot: kalibrasyondan ÖNCE
+
+    window._plane_rectification = _sample_plane_rectification(mm_per_px=0.4)
+    window._push_mm_per_px(0.4, refresh=False)
+    assert window.graph.nodes[node_id].params["mm_per_px"] == pytest.approx(0.4)
+
+    # Kullanıcı kalibrasyonla ilgisi olmayan bir yapısal değişiklik yapıp geri alıyor.
+    window.add_operator("filter.gaussian_blur")
+    window._on_undo()
+
+    assert window.graph.nodes[node_id].params["mm_per_px"] == pytest.approx(0.4)
+
+
+def test_undo_still_reverts_a_manually_typed_mm_per_px(qtbot):
+    """Otomatik bir kalibrasyon kaynağı YOKKEN, kullanıcının ELLE girdiği `mm_per_px`'in geri
+    alınması meşru bir Geri Al'dır -- `_reapply_active_calibration` buna dokunmamalı."""
+    window = MainWindow()
+    qtbot.addWidget(window)
+    node_id = window.add_operator("analysis.region_props")
+
+    values = dict(window.param_form.values())
+    values["mm_per_px"] = 0.25
+    window._on_params_changed(values)
+    window._flush_pending_params()
+    assert window.graph.nodes[node_id].params["mm_per_px"] == pytest.approx(0.25)
+
+    window._on_undo()
+
+    assert window.graph.nodes[node_id].params["mm_per_px"] == pytest.approx(0.0)
+
+
 def test_load_calibration_profile_applies_plane_rectification_mm_per_px_immediately(qtbot, monkeypatch):
     from imgflow.io_utils import calibration_store
 
@@ -2901,6 +2940,167 @@ def test_window_can_still_be_minimized(qtbot):
     window.showMinimized()
 
     assert window.isMinimized()
+
+
+def test_closing_window_disconnects_destroyed_handlers_of_all_dialogs_ever_opened(qtbot):
+    """Uzun süredir var olan test-paketi kararsızlığının ("AttributeError: Slot 'MainWindow::'
+    not found", rastgele bir testte patlıyordu) kök nedeni: dialogların `destroyed` sinyali
+    `self`'i (MainWindow) yakalayan bir geri çağrıya bağlıydı. `deleteLater()` ile yok
+    edilmeyi BEKLEYEN bir dialog varsa (Ölçüm Aracı her açılışta yeniden kurulur, eskisi
+    silinmeyi bekler) ana pencere ÖNCE yok edilebiliyor; sinyal daha sonra ölü pencerede
+    slot arayıp patlıyordu. Artık `_connect_destroyed` her dialog'u kaydediyor ve
+    `closeEvent` hepsinin bağlantısını kesiyor -- SADECE o an izlenen tekil referanslara
+    bakmak yetmiyordu (silinmeyi bekleyen eski örnek hiçbir alanda tutulmuyor)."""
+    import shiboken6
+
+    window = MainWindow()
+    qtbot.addWidget(window)
+
+    window._on_open_measurement_tool()
+    window._on_open_measurement_tool()  # eskisi deleteLater() ile silinmeyi bekler
+    window._on_open_help()
+
+    assert len(window._tracked_dialogs) >= 3
+    help_dialog = window._help_dialog
+
+    window.close()
+
+    assert window._tracked_dialogs == []
+
+    # Bağlantı gerçekten kesildi mi? Kapanıştan SONRA dialog yok edilirse eski geri çağrı
+    # (`setattr(self, "_help_dialog", None)`) ARTIK ÇALIŞMAMALI -- bu, ölü pencereye ulaşan
+    # sinyalin de artık var olmadığının doğrudan kanıtı.
+    window._help_dialog = "NÖBETÇİ"
+    assert shiboken6.isValid(help_dialog)
+    help_dialog.deleteLater()
+    qtbot.wait(50)
+
+    assert window._help_dialog == "NÖBETÇİ"
+
+
+def test_in_context_view_shows_filtered_roi_inside_the_full_frame(qtbot, tmp_path):
+    """Gerçek kullanıcı isteği: "ROI uygulayınca başka filtreye geçince sadece ROI alanı
+    görünüyor, ben ROI dışında kalan alanı da görmek istiyorum -- işlemli ve işlemsiz
+    bölgeyi görmüş olurum böylece"."""
+    from imgflow.ui.main_window import _paste_filtered_into_frame
+
+    window = MainWindow()
+    qtbot.addWidget(window)
+    image = np.full((200, 300, 3), 200, dtype=np.uint8)
+    cv2.circle(image, (150, 100), 40, (30, 30, 30), -1)
+    path = tmp_path / "scene.png"
+    cv2.imwrite(str(path), image)
+
+    src_id = window.add_operator("io.image_source")
+    window._on_step_selected(src_id)
+    window.param_form.params_changed.emit({"path": str(path)})
+    roi_id = window.add_operator("roi.region")
+    window._on_step_selected(roi_id)
+    window.param_form.params_changed.emit(
+        {"enabled": True, "shape": "RECT", "x": 100, "y": 50, "w": 100, "h": 100}
+    )
+    window.add_operator("segment.threshold")
+
+    modes = [window.view_mode_combo.itemData(i) for i in range(window.view_mode_combo.count())]
+    assert "in_context" in modes
+
+    window.view_mode_combo.setCurrentIndex(modes.index("filtered"))
+    window._refresh_preview()
+    assert (window.image_view._pixmap.width(), window.image_view._pixmap.height()) == (100, 100)
+
+    window.view_mode_combo.setCurrentIndex(modes.index("in_context"))
+    window._refresh_preview()
+    # Tam kare boyutunda -- yani ROI dışındaki alan da görünüyor.
+    assert (window.image_view._pixmap.width(), window.image_view._pixmap.height()) == (300, 200)
+
+    # Yapıştırmanın gerçekten yapıldığını (ve ROI dışının DEĞİŞMEDİĞİNİ) doğrudan doğrula.
+    base = np.full((200, 300, 3), 200, dtype=np.uint8)
+    patch = np.zeros((100, 100), dtype=np.uint8)
+    patch[40:60, 40:60] = 255
+    composed = _paste_filtered_into_frame(
+        base, patch, window.graph, window.pipeline.order, window.pipeline.order[-1]
+    )
+    assert composed is not None
+    assert set(np.unique(composed[60:140, 110:190, 0]).tolist()) <= {0, 255}  # ROI içi: filtre
+    assert (composed[10:40, 10:40] == 200).all()  # ROI dışı: ham kare
+
+
+def test_in_context_view_falls_back_when_there_is_no_roi_crop(qtbot):
+    """Zincirde ROI yoksa yapıştırmanın anlamı kalmaz -- `None` dönüp normal 'filtrelenmiş'
+    davranışa düşülmeli (çökme/boş ekran yok)."""
+    from imgflow.ui.main_window import _paste_filtered_into_frame
+
+    window = MainWindow()
+    qtbot.addWidget(window)
+    base = np.full((100, 100, 3), 128, dtype=np.uint8)
+
+    assert _paste_filtered_into_frame(base, base.copy(), window.graph, [], None) is None
+    assert _paste_filtered_into_frame(None, base, window.graph, [], "x") is None
+
+
+def test_selecting_operators_never_widens_the_right_panel(qtbot):
+    """Gerçek kullanıcı raporu: "gereksiz sayfa büyümeleri". Kök neden ölçülerek bulundu:
+    uzun Türkçe parametre etiketleri (ör. "Bulanıklık Yarıçapı (px, sadece 'Yerel/Dinamik'
+    modda)") sarmadıkları için TEK BAŞLARINA `ParamForm`'un -- ve dolayısıyla sağ sekme
+    panelinin, `central_splitter`'ın ve ana pencerenin -- minimum genişliğini büyütüyordu
+    (`correction.flat_field` seçilince sağ panel minimumu 358px'ten 880px'e çıkıyor, splitter
+    panoları yeniden dağıtılıp görüntü paneli daralıyordu). Etiket sarma + parametre
+    sekmesinin kaydırma alanına alınması bu talebi ÖZÜMSER."""
+    window = MainWindow()
+    qtbot.addWidget(window)
+    window.show()
+
+    base_min_width = window.right_tabs.minimumSizeHint().width()
+
+    # Bilinen en uzun etiketli operatörler (ölçümde en çok büyüme yapan üçü).
+    for op_id in ("correction.flat_field", "analysis.region_props", "analysis.texture_props"):
+        node_id = window.add_operator(op_id)
+        assert window.right_tabs.minimumSizeHint().width() == base_min_width, op_id
+        window.remove_operator(node_id)
+
+
+def test_long_status_text_does_not_widen_the_center_panel(qtbot):
+    """Aynı raporun ikinci kök nedeni: `status_label` sarmasız olduğu için uzun bir hata
+    mesajı ORTA panelin (ve pencerenin) minimum genişliğini metnin TAM uzunluğu kadar
+    büyütüyordu."""
+    window = MainWindow()
+    qtbot.addWidget(window)
+    window.show()
+    center = window.central_splitter.widget(1)
+    base = center.minimumSizeHint().width()
+
+    window.status_label.setText(
+        "Hata: Node 'flat_field' (correction.flat_field) çalıştırılırken beklenmeyen bir "
+        "sorun oluştu ve bu mesaj bilerek çok uzun tutuldu ki panel genişliğini zorlasın."
+    )
+
+    assert center.minimumSizeHint().width() == base
+
+
+def test_hover_info_shows_pixels_next_to_calibrated_units(qtbot):
+    """Gerçek kullanıcı isteği: "kalibrasyon varsa pixelin yanında cm veya mm de yazsın" --
+    `region_props` dalı kalibrasyon aktifken px değerini TAMAMEN gizliyordu."""
+    window = MainWindow()
+    qtbot.addWidget(window)
+    window._on_hover_measurement_changed(
+        {
+            "label": 1,
+            "area": 1000.0,
+            "area_mm2": 250.0,
+            "perimeter": 120.0,
+            "perimeter_mm": 60.0,
+            "obb_w": 50.0,
+            "obb_h": 20.0,
+            "obb_mm_w": 25.0,
+            "obb_mm_h": 10.0,
+            "obb_angle": 0.0,
+        }
+    )
+
+    text = window.hover_info_label.text()
+    assert "50 x 20 px" in text and "2.50 x 1.00 cm" in text
+    assert "1000 px²" in text and "2.50 cm²" in text
+    assert "120 px" in text and "60.0 mm" in text
 
 
 def test_switching_right_tabs_reasserts_splitter_sizes(qtbot):

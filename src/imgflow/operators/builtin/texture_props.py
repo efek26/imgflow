@@ -211,6 +211,7 @@ class TexturePropsOp:
             "alanlı nesneler (eşiklemeden kalan küçük gürültü/kırıntılar ya da parlama/"
             "yansımadan kalan küçük parlak lekeler) yok sayılır. 0 = kapalı (varsayılan), "
             "hiçbir nesne alanına göre elenmez.",
+            advanced=True,
         ),
         ParamSpec(
             "max_object_area",
@@ -221,6 +222,7 @@ class TexturePropsOp:
             help="Sadece Otomatik Nesne Tespiti açıkken kullanılır: bu değerden BÜYÜK "
             "alanlı nesneler (ör. yanlışlıkla eşiklenmiş arka plan/bant) yok sayılır. "
             "0 = kapalı (varsayılan), hiçbir nesne alanına göre elenmez.",
+            advanced=True,
         ),
         ParamSpec(
             "threshold_mode",
@@ -234,6 +236,7 @@ class TexturePropsOp:
             "kendisini nesne sanabilir. Bu durumda 'manual' seçip aşağıdaki 'Eşik Değeri'ni "
             "canlı önizlemeye bakarak nesnenin tamamını (parlamayı değil) kapsayacak "
             "şekilde elle ayarlayın.",
+            advanced=True,
         ),
         ParamSpec(
             "threshold_value",
@@ -244,6 +247,7 @@ class TexturePropsOp:
             label="Eşik Değeri (Eşikleme Modu = manual)",
             help="Bu değerden PARLAK pikseller nesne, KOYU pikseller arka plan sayılır. "
             "Sadece Eşikleme Modu 'manual' iken kullanılır.",
+            advanced=True,
         ),
         ParamSpec(
             "fill_holes",
@@ -254,6 +258,7 @@ class TexturePropsOp:
             "dış konturunun içi TAMAMEN dolu sayılır — ışık yansımasının/parlamanın nesne "
             "içinde bıraktığı küçük eşik-altı 'delikleri' doldurup nesnenin tek parça "
             "algılanmasını sağlar (nesnenin dış sınırı hâlâ eşiği geçtiği sürece çalışır).",
+            advanced=True,
         ),
         ParamSpec(
             "close_kernel_size",
@@ -265,6 +270,7 @@ class TexturePropsOp:
             help="Sadece Otomatik Nesne Tespiti açıkken kullanılır: eşiklenmiş görüntüye "
             "bu boyutta bir morfolojik KAPAMA uygulanır — parlama/yansımanın nesne "
             "SINIRINDA bıraktığı ince kopuklukları köprüler. 0 = kapalı (varsayılan).",
+            advanced=True,
         ),
         ParamSpec(
             "manual_roi_enabled",
@@ -295,6 +301,7 @@ class TexturePropsOp:
             max=20,
             label="Mesafe (px)",
             help="Eş-oluşum matrisi için karşılaştırılan komşu piksel çifti arasındaki uzaklık.",
+            advanced=True,
         ),
         ParamSpec(
             "angle",
@@ -308,6 +315,7 @@ class TexturePropsOp:
             "önerilen yöntem: banttaki ürün rastgele döndüğünde TEK bir yön aynı yüzey "
             "dokusu için farklı contrast/homogeneity ölçebilir, ortalama bu duyarlılığı "
             "azaltır (4 kat daha yavaştır, sadece gerektiğinde seçin).",
+            advanced=True,
         ),
         ParamSpec(
             "levels",
@@ -319,6 +327,7 @@ class TexturePropsOp:
             help="Görüntü bu kadar gri seviyeye kuantalanır. Düşük değer (ör. 8-16) daha "
             "hızlı ama daha az hassas; yüksek değer (ör. 64-256) daha yavaş ama daha "
             "ayrıntılı doku farkları yakalar.",
+            advanced=True,
         ),
     ]
 

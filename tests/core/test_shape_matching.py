@@ -7,6 +7,7 @@ from imgflow.core.roi import RoiRect
 from imgflow.core.shape_matching import (
     LabeledMatch,
     ShapeMatchingError,
+    ShapeModel,
     _nms,
     _score_map,
     build_search_pyramid,
@@ -635,7 +636,19 @@ def test_find_shape_model_recovers_noisy_off_step_angle_previously_missed():
         shape_matching_module._COARSE_ACCEPT_LOOSENING = 1.0
         shape_matching_module._REFINE_XY_RADIUS = 3
         pre_fix_matches = find_shape_model(
-            search, model, angle_step_coarse=5.0, min_score=0.8, greediness=0.85, max_matches=1
+            search,
+            model,
+            angle_step_coarse=5.0,
+            min_score=0.8,
+            greediness=0.85,
+            max_matches=1,
+            # O dönemde MinContrast (HALCON'daki karşılığı, bkz. `_DEFAULT_MIN_CONTRAST`)
+            # HENÜZ YOKTU -- gürültü pikselleri de tam birim uzunlukta rastgele yön
+            # vektörleriyle skora karışıyordu. Tarihsel kusuru doğru simüle etmek için burada
+            # da kapatılmalı; açık bırakılırsa bu sahnedeki σ=15 gürültü bastırıldığı için
+            # eski sabitler BİLE nesneyi bulabiliyor (yani MinContrast'ın kendisi de aynı
+            # "kaçırma" sınıfını hafifletiyor, ama bu testin kanıtlamak istediği şey değil).
+            min_contrast=0.0,
         )
     finally:
         shape_matching_module._COARSE_ACCEPT_LOOSENING = old_loosening
@@ -647,6 +660,320 @@ def test_find_shape_model_recovers_noisy_off_step_angle_previously_missed():
     assert len(matches) == 1
     assert matches[0].angle == pytest.approx(10.5, abs=1.0)
     assert matches[0].score >= 0.8
+
+
+def test_coarse_search_skips_too_sparse_pyramid_levels():
+    """Gerçek kaçırma bug'ı (ölçüldü): aşırı kaba piramit seviyelerinde nokta sayısı düşünce
+    skor dağılımı düzleşiyor ve arka plan gürültüsü gerçek eşleşmelerin skoruna yaklaşıyor;
+    aday listesi gürültüyle dolup gerçek nesneler `carry_limit` budamasında taşıyordu
+    (5 seviyeli modelde 0/4 eşleşme). Aday üretimi artık YETERLİ noktası olan en kaba
+    seviyeden başlar."""
+    model = _train()
+    sparse = ShapeModel(
+        levels=[
+            model.levels[0],
+            shape_matching_module.ShapeLevel(points=np.zeros((5, 2)), angles=np.zeros(5)),
+        ],
+        corners=model.corners,
+    )
+
+    # 5 noktalı seviye ATLANMALI -> tam çözünürlük seviyesi (0) kullanılır.
+    assert shape_matching_module.coarse_search_level(sparse) == 0
+    # Yeterli noktası olan model en kaba seviyesini KULLANMAYA devam eder.
+    assert shape_matching_module.coarse_search_level(model) == len(model.levels) - 1
+
+
+def test_deep_auto_pyramid_model_still_finds_all_objects():
+    """Uçtan uca: otomatik (derin) piramitle eğitilmiş bir model, gürültülü bir sahnede
+    3 seviyeli modelle AYNI sonucu vermeli -- eskiden hiçbirini bulamıyordu."""
+    reference = _reference_image()
+    roi = RoiRect(50, 50, 100, 100)
+    shallow = train_shape_model(reference, roi, num_levels=3)
+    deep = train_shape_model(reference, roi, num_levels=None)
+    assert len(deep.levels) > len(shallow.levels)  # gerçekten daha derin
+
+    search = np.full((500, 640), 255, dtype=np.uint8)
+    for cx, cy, angle in [(120, 120, 0.0), (400, 200, 30.0), (250, 380, -25.0)]:
+        _draw_triangle(search, (cx, cy), angle)
+    noise = np.random.default_rng(1).normal(0, 8, search.shape)
+    search = np.clip(search.astype(np.float64) + noise, 0, 255).astype(np.uint8)
+
+    shallow_matches = find_shape_model(search, shallow, min_score=0.6, max_matches=None)
+    deep_matches = find_shape_model(search, deep, min_score=0.6, max_matches=None)
+
+    assert len(shallow_matches) == 3
+    assert len(deep_matches) == 3
+
+
+def test_min_contrast_zeroes_weak_gradient_pixels_in_the_search_pyramid():
+    """HALCON MinContrast karşılığı: gradyanı eşiğin altındaki pikseller puanlamaya HİÇ
+    katılmamalı. Eşik olmadan DÜZ arka plan pikselleri bile tam birim uzunlukta (rastgele
+    yönlü) bir vektör üretip skoru kirletiyordu."""
+    image = np.full((60, 60), 128, dtype=np.uint8)
+    image[10:20, 10:20] = 0  # GÜÇLÜ kenarlı kare
+
+    no_threshold = shape_matching_module._build_target_pyramid(
+        image.astype(np.float32), 1, min_contrast=0.0
+    )[0]
+    with_threshold = shape_matching_module._build_target_pyramid(
+        image.astype(np.float32), 1, min_contrast=50.0
+    )[0]
+
+    flat_norm = no_threshold[0][50, 50] ** 2 + no_threshold[1][50, 50] ** 2
+    assert flat_norm == pytest.approx(1.0, abs=1e-5)
+    assert with_threshold[0][50, 50] == 0.0
+    assert with_threshold[1][50, 50] == 0.0
+    strong_norm = with_threshold[0][10, 15] ** 2 + with_threshold[1][10, 15] ** 2
+    assert strong_norm == pytest.approx(1.0, abs=1e-5)
+
+
+def test_ignore_polarity_finds_inverted_contrast_object_that_default_misses():
+    """HALCON Metric='ignore_global_polarity': kontrast tümüyle ters döndüğünde (açık zemin
+    üzerinde koyu nesne yerine koyu zemin üzerinde açık nesne) gradyan yönleri 180° döner ve
+    skor -1'e gider; nesne mükemmel eşleştiği halde kaçırılır."""
+    model = _train()
+    inverted = np.zeros((200, 200), dtype=np.uint8)
+    cv2.fillPoly(inverted, [(_BASE_TRIANGLE + np.array([100, 100])).astype(np.int32)], color=255)
+
+    default_matches = find_shape_model(inverted, model, min_score=0.6, max_matches=1)
+    polarity_matches = find_shape_model(
+        inverted, model, min_score=0.6, max_matches=1, ignore_polarity=True
+    )
+
+    assert default_matches == []
+    assert len(polarity_matches) == 1
+    assert polarity_matches[0].x == pytest.approx(100, abs=3)
+    assert polarity_matches[0].y == pytest.approx(100, abs=3)
+
+
+def test_subpixel_produces_non_integer_position_but_stays_next_to_the_integer_peak():
+    """HALCON SubPixel='interpolation' karşılığı."""
+    model = _train()
+    search = np.full((220, 220), 255, dtype=np.uint8)
+    _draw_triangle(search, (110, 105), 0.0)
+
+    off = find_shape_model(search, model, min_score=0.5, max_matches=1, subpixel=False)
+    on = find_shape_model(search, model, min_score=0.5, max_matches=1, subpixel=True)
+
+    assert off and on
+    assert float(off[0].x).is_integer() and float(off[0].y).is_integer()
+    assert not (float(on[0].x).is_integer() and float(on[0].y).is_integer())
+    assert on[0].x == pytest.approx(off[0].x, abs=1.0)
+    assert on[0].y == pytest.approx(off[0].y, abs=1.0)
+
+
+def test_last_level_stops_refinement_early_but_reports_full_resolution_coordinates():
+    """HALCON'un NumLevels'ındaki 'son seviye' bileşeni: iyileştirme daha kaba bir seviyede
+    durur (daha hızlı), ama sonuç TAM ÇÖZÜNÜRLÜK koordinatlarında raporlanmalı."""
+    model = _train()
+    search = np.full((220, 220), 255, dtype=np.uint8)
+    _draw_triangle(search, (110, 105), 0.0)
+
+    matches = find_shape_model(search, model, min_score=0.4, max_matches=1, last_level=1)
+
+    assert len(matches) == 1
+    # Seviye 1'de bulunup 2 ile ölçeklendiği için hassasiyet kabalaşır, konum doğru kalır.
+    assert matches[0].x == pytest.approx(110, abs=5)
+    assert matches[0].y == pytest.approx(105, abs=5)
+
+
+def test_max_overlap_keeps_two_adjacent_objects_that_distance_nms_would_merge():
+    """HALCON MaxOverlap: sabit mesafe eşiği yan yana duran iki AYRI nesneyi tek eşleşmeye
+    indirgeyebiliyordu; örtüşme oranı kuralı onları ayrı tutar."""
+    candidates = [
+        [100.0, 100.0, 0.0, 1.0, 0.9],
+        [118.0, 100.0, 0.0, 1.0, 0.85],  # yan yana; kutuları kısmen örtüşüyor
+    ]
+    dist_thresh = 25.0  # mesafe kuralı bunları BİRLEŞTİRİR
+    box = (55.0, 70.0)
+
+    assert len(_nms(list(candidates), dist_thresh)) == 1
+    assert len(_nms(list(candidates), dist_thresh, box, 0.8)) == 2
+    # Eşik düşürülünce yine birleşirler -- kural gerçekten uygulanıyor.
+    assert len(_nms(list(candidates), dist_thresh, box, 0.3)) == 1
+
+
+# --- İç bölge doğrulaması / teşhis / sadece dış kontur -------------------------------
+
+
+def _scene_with_object_and_blank_area() -> np.ndarray:
+    """Solda GERÇEK bir üçgen, sağda hiçbir şey (düz zemin) -- doğrulamanın ayırt etmesi
+    gereken iki bölge."""
+    image = np.full((200, 400), 255, dtype=np.uint8)
+    _draw_triangle(image, (100, 100), 0.0)
+    return image
+
+
+def test_interior_verification_rejects_a_candidate_on_blank_background():
+    """Gerçek kullanıcı raporu: "güven faktörünü düşürünce başka yerleri seçiyor". İç bölge
+    doğrulaması, skordan BAĞIMSIZ olarak, adayın konumunda gerçekten nesnenin öğretildiği
+    iç/dış kontrast ilişkisi var mı diye bakar -- düz zeminde oran ~0 çıkar ve elenir."""
+    model = _train()
+    assert model.supports_interior_verification()
+    gray = _scene_with_object_and_blank_area().astype(np.float32)
+
+    on_object = [100.0, 100.0, 0.0, 1.0, 0.9]
+    on_blank = [320.0, 100.0, 0.0, 1.0, 0.9]  # AYNI skor, ama nesne yok
+
+    assert shape_matching_module._passes_interior_verification(gray, model, on_object, 0.35)
+    assert not shape_matching_module._passes_interior_verification(gray, model, on_blank, 0.35)
+
+
+def test_interior_verification_works_for_bright_object_on_dark_background_too():
+    """Ölçüt aydınlatmadan bağımsız bir ORAN ve İŞARETİ eğitimden geliyor -- bu yüzden
+    "koyu nesne / açık zemin" gibi sahneye özel bir varsayım YOK; ters kontrastlı bir üründe
+    de aynı şekilde çalışır (kullanıcı: "sadece bu örnek için düşünme")."""
+    reference = np.zeros((200, 200), dtype=np.uint8)
+    cv2.fillPoly(reference, [(_BASE_TRIANGLE + np.array([100, 100])).astype(np.int32)], color=255)
+    model = train_shape_model(reference, RoiRect(50, 50, 100, 100))
+    assert model.interior_contrast is not None and model.interior_contrast > 0  # nesne AÇIK
+
+    scene = np.zeros((200, 400), dtype=np.uint8)
+    cv2.fillPoly(scene, [(_BASE_TRIANGLE + np.array([100, 100])).astype(np.int32)], color=255)
+    gray = scene.astype(np.float32)
+
+    assert shape_matching_module._passes_interior_verification(
+        gray, model, [100.0, 100.0, 0.0, 1.0, 0.9], 0.35
+    )
+    assert not shape_matching_module._passes_interior_verification(
+        gray, model, [320.0, 100.0, 0.0, 1.0, 0.9], 0.35
+    )
+
+
+def test_interior_verification_is_skipped_for_models_without_the_stored_stats():
+    """Bu özellikten ÖNCE kaydedilmiş `.json` modellerde alanlar `None` gelir; doğrulama
+    sessizce ATLANIR (aday KABUL edilir), çökme olmaz -- kullanıcı modeli yeniden eğitene
+    kadar davranış eskisiyle aynı kalır."""
+    model = _train()
+    legacy = ShapeModel.from_dict(
+        {"levels": [lvl.to_dict() for lvl in model.levels], "corners": model.corners.tolist()}
+    )
+    gray = _scene_with_object_and_blank_area().astype(np.float32)
+
+    assert not legacy.supports_interior_verification()
+    assert shape_matching_module._passes_interior_verification(
+        gray, legacy, [320.0, 100.0, 0.0, 1.0, 0.9], 0.35
+    )
+
+
+def test_verification_filters_a_false_positive_that_a_lowered_threshold_lets_through():
+    """Uçtan uca: eşik düşürüldüğünde ortaya çıkan yanlış eşleşmeler doğrulamayla elenir,
+    GERÇEK nesne ise korunur."""
+    model = _train()
+    search = _scene_with_object_and_blank_area()
+    noise = np.random.default_rng(3).normal(0, 12, search.shape)
+    search = np.clip(search.astype(np.float64) + noise, 0, 255).astype(np.uint8)
+
+    without = find_shape_model(search, model, min_score=0.3, max_matches=None)
+    with_verification = find_shape_model(
+        search, model, min_score=0.3, max_matches=None, verify_interior=True
+    )
+
+    assert len(with_verification) <= len(without)
+    assert any(abs(m.x - 100) < 12 and abs(m.y - 100) < 12 for m in with_verification)
+    # Nesnenin olmadığı sağ yarıda hiçbir eşleşme KALMAMALI.
+    assert all(m.x < 250 for m in with_verification)
+
+
+def test_diagnostics_report_best_score_even_when_nothing_is_accepted():
+    """Kullanıcı "neden bulunamadı"yı görebilmeli: eşleşme olmasa bile en iyi aday skoru
+    raporlanır."""
+    model = _train()
+    # Öğretilenden %20 BÜYÜK bir üçgen: aday üretir (kenar yönleri benzer) ama ölçek
+    # araması kapalı olduğundan skoru eşiğin altında kalır.
+    search = np.full((260, 260), 255, dtype=np.uint8)
+    _draw_scaled_triangle(search, (130, 130), 0.0, 1.2)
+    diagnostics: dict = {}
+
+    matches = find_shape_model(
+        search, model, min_score=0.9, max_matches=1, diagnostics=diagnostics
+    )
+
+    assert matches == []
+    assert diagnostics["best_score"] is not None
+    assert 0.0 < diagnostics["best_score"] < 0.9
+    assert diagnostics["rejected"]
+    assert diagnostics["rejected"][0]["reason"] == "skor"
+
+
+def test_diagnostics_mark_candidates_rejected_by_verification_separately():
+    model = _train()
+    search = _scene_with_object_and_blank_area()
+    diagnostics: dict = {}
+
+    find_shape_model(
+        search, model, min_score=0.3, max_matches=None,
+        verify_interior=True, diagnostics=diagnostics,
+    )
+
+    assert diagnostics["verified"] is True
+    reasons = {c["reason"] for c in diagnostics["rejected"]}
+    assert "dogrulama" in reasons or not diagnostics["rejected"]
+
+
+def test_outer_contour_only_drops_interior_edges_but_keeps_the_silhouette():
+    """İç yapısı olan bir nesnede (dış kare + içeride ayrı bir kare) `outer_contour_only`
+    modelin SADECE dış hattını tutmalı."""
+    reference = np.full((200, 200), 255, dtype=np.uint8)
+    cv2.rectangle(reference, (60, 60), (140, 140), 0, -1)
+    cv2.rectangle(reference, (85, 85), (115, 115), 255, -1)  # içeride belirgin bir kenar
+    roi = RoiRect(50, 50, 100, 100)
+
+    full = train_shape_model(reference, roi)
+    outer = train_shape_model(reference, roi, outer_contour_only=True)
+
+    def _max_inner_fraction(model):
+        pts = model.levels[0].points
+        radius = np.linalg.norm(pts, axis=1)
+        return float((radius < 0.6 * radius.max()).mean())
+
+    assert _max_inner_fraction(full) > 0.1  # iç kare modele giriyordu
+    assert _max_inner_fraction(outer) < 0.02  # artık neredeyse tamamen dış hat
+    assert outer.levels[0].points.shape[0] > 20  # dış hat yeterince temsil ediliyor
+
+
+def test_outer_contour_only_drops_deep_notches_documented_tradeoff():
+    """Belgelenen ödünleşim (bkz. `_keep_outer_points` docstring'i): DERİN girintili
+    şekillerde (yıldız/dişli) girintideki meşru dış-hat noktaları da elenir. Bu test o
+    davranışı SABİTLER ki ileride sessizce değişmesin -- böyle şekillerde seçenek KAPALI
+    bırakılmalıdır."""
+    theta = np.linspace(0, 2 * np.pi, 240, endpoint=False)
+    radius = np.where(np.arange(240) % 2 == 0, 50.0, 25.0)  # girinti = dışın %50'si
+    star = np.stack([radius * np.cos(theta), radius * np.sin(theta)], axis=1)
+
+    kept, _ = shape_matching_module._keep_outer_points(star, np.zeros(len(star)))
+
+    kept_radius = np.linalg.norm(kept, axis=1)
+    assert (kept_radius > 40).all(), "sadece çıkıntılar kalmalı"
+    assert len(kept) == 120
+
+
+def test_outer_contour_only_model_still_finds_the_object_when_interior_is_gone():
+    """Asıl fayda: iç yapısı KAYBOLMUŞ (gölgede kalmış) bir örnekte bile aynı model yüksek
+    skorla bulunmalı -- kullanıcının "bazı kapakları bulamıyor" sorununun genel karşılığı."""
+    reference = np.full((200, 200), 255, dtype=np.uint8)
+    cv2.rectangle(reference, (60, 60), (140, 140), 0, -1)
+    cv2.rectangle(reference, (85, 85), (115, 115), 255, -1)
+    roi = RoiRect(50, 50, 100, 100)
+
+    # Arama sahnesinde İÇ yapı yok (düz dolu kare) -- dışı aynı.
+    search = np.full((220, 220), 255, dtype=np.uint8)
+    cv2.rectangle(search, (70, 70), (150, 150), 0, -1)
+
+    full_matches = find_shape_model(
+        np.ascontiguousarray(search), train_shape_model(reference, roi), min_score=0.5, max_matches=1
+    )
+    outer_matches = find_shape_model(
+        np.ascontiguousarray(search),
+        train_shape_model(reference, roi, outer_contour_only=True),
+        min_score=0.5,
+        max_matches=1,
+    )
+
+    assert outer_matches, "sadece dış kontur modeli nesneyi bulmalı"
+    if full_matches:
+        assert outer_matches[0].score > full_matches[0].score
+    assert outer_matches[0].score >= 0.8
 
 
 def _draw_elongated_shape(image: np.ndarray, center: tuple[float, float], angle_deg: float) -> None:

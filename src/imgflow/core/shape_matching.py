@@ -63,6 +63,22 @@ _DEFAULT_ANGLE_STEP_COARSE = 3.0
 "nesne bulunamıyor/kaçırılıyor"). 3.0 örnekleme boşluğunu azaltır (kaba geçiş ~1.67x daha
 yavaş olur ama `carry_limit` aday sayısını zaten sınırladığı için tipik pipeline
 gecikmesine etkisi ihmal edilebilir)."""
+_MIN_COARSE_LEVEL_POINTS = 100
+"""Kaba (aday üretme) aramasının kullanacağı piramit seviyesinde bulunması gereken EN AZ
+nokta sayısı; bu sayının altındaki (daha kaba) seviyeler aday üretmek için ATLANIR.
+
+**Neden (ölçüldü):** çok kaba seviyelerde nokta sayısı düştükçe skor dağılımı düzleşir --
+1280x1024'lük gürültülü (σ=8) bir sahnede 4 gerçek nesnenin kaba skoru seviye 4'te (21 nokta)
+0.79-0.86 iken ARKA PLAN GÜRÜLTÜSÜNÜN 99.9 yüzdeliği 0.77'ye çıkıyordu. Eşik (0.32) her
+ikisinin de altında kaldığından binlerce gürültü adayı üretiliyor, `carry_limit` budamasında
+gerçek eşleşmeler listeden taşıyor ve nesne KAÇIRILIYORDU (ölçüm: 5 seviyeli modelde 0/4,
+4 seviyelide 2/4, 3 seviyelide 4/4 eşleşme). Seviye başına nokta sayısı yeterli olduğunda
+gürültü tabanı belirgin şekilde düşüyor (seviye 2'de 0.39).
+
+Bu kontrol ARAMA tarafında olduğundan, DAHA ÖNCE eğitilmiş (fazla derin) modeller de yeniden
+eğitilmeye gerek kalmadan düzelir. Model hiçbir seviyede bu sayıya ulaşmıyorsa (küçük/az
+kenarlı nesneler) en kaba seviye yine kullanılır -- davranış eskisi gibi olur, kimse
+"model çok küçük" diye eşleşmesiz kalmaz."""
 _COARSE_ACCEPT_LOOSENING = 0.6
 """Kaba (en bulanık) piramit seviyesinde bir adayın üretilmesi için gereken eşiği, nihai
 `min_score` kabul eşiğinden AYRIŞTIRAN çarpan. En kaba seviye `cv2.pyrDown` ile bulanıklaşmış
@@ -89,6 +105,49 @@ _REFINE_SCALE_DIVISOR = 2.0
 _MIN_SCALE_STEP = 0.01
 """İyileştirme sırasında ölçek penceresi (`angle_window` ile AYNI desen) her seviyede
 `_REFINE_SCALE_DIVISOR`'a bölünerek daralır -- bu taban, adım sıfıra çökmesin diye."""
+_DEFAULT_MIN_CONTRAST = 10.0
+"""HALCON'un `create_shape_model(..., MinContrast, ...)` parametresinin karşılığı (gri seviye
+cinsinden). Puanlama SADECE gradyan YÖNÜNE baktığından (büyüklük normalize edilir), gradyanı
+neredeyse SIFIR olan düz/gürültülü bir arka plan pikseli bile rastgele ama TAM BİRİM uzunlukta
+bir yön vektörü üretir ve skora ±1 katkı verir -- yani gürültü, gerçek bir kenar kadar
+"güçlü" sayılır. HALCON bu yüzden MinContrast altındaki pikselleri puanlamadan tamamen
+dışlar; burada da eşiğin altındaki piksellerin cos/sin haritası SIFIRLANIR (katkısı 0 olur,
+yanlış YÖNE sahip bir kenar gibi CEZALANDIRILMAZ). İki etkisi var: (1) dokulu/gürültülü
+arka planda yanlış eşleşmeler belirgin azalır, (2) skor gerçekten "modelin kenarlarının yüzde
+kaçı görüntüde BULUNDU" anlamına gelir, `min_score` sezgisel hale gelir."""
+
+_SOBEL_GRADIENT_SCALE = 4.0
+"""`min_contrast` gri-seviye cinsinden verilir ama karşılaştırma `cv2.Sobel(ksize=3)`
+büyüklüğü üzerinde yapılır: genliği Δ olan ideal bir basamak kenarı bu çekirdekle ~4Δ
+büyüklük üretir, bu yüzden eşik `min_contrast * 4`'tür."""
+
+_OUTER_CONTOUR_BINS = 360
+"""`train_shape_model(outer_contour_only=True)`: merkez etrafında kaç açısal kutuya bölünüp
+her kutuda en dıştaki noktanın tutulacağı. 360 (derece başına bir örnek) tipik nesne
+boyutlarında dış hattı seyrekleştirmeden temsil eder."""
+_OUTER_CONTOUR_SMOOTH_BINS = 3
+"""Silüet sınırı hesaplanırken her açısal kutunun kaç KOMŞU kutuyla birlikte (maksimum
+alınarak) değerlendirileceği (±3 kutu = ±3°). Bkz. `_keep_outer_points`."""
+_OUTER_CONTOUR_RADIUS_TOLERANCE = 0.85
+"""Bir noktanın "dış hatta ait" sayılması için, kendi yönündeki silüet yarıçapının en az bu
+oranı kadar uzakta olması gerekir. 1.0 (yalnızca tam en dıştaki nokta) dış hattı gereksiz
+seyrekleştirirdi; 0.85 kalın/pürüzlü kenarları korurken iç yapıyı dışarıda bırakır."""
+_INTERIOR_PROBE_SAMPLES = 120
+"""İç bölge doğrulaması için iç/dış bölgeden örneklenen nokta sayısı (her biri). Aday başına
+~240 piksel okuması demek -- vektörize `numpy` indekslemeyle maliyeti ihmal edilebilir."""
+_INTERIOR_PROBE_MARGIN = 0.15
+"""Dış (arka plan) halkasının, nesnenin sınırlayıcı kutusuna oranla ne kadar dışarı taşacağı."""
+_MIN_PROBE_SAMPLES = 10
+"""Bir adayın iç/dış ortalaması için görüntü SINIRLARI İÇİNDE kalması gereken en az örnek
+sayısı; altında kalırsa ölçüm güvenilmez sayılıp doğrulama o aday için ATLANIR."""
+_DEFAULT_VERIFY_TOLERANCE = 0.35
+"""Aday kontrastının, eğitimdekinin en az bu KATI olması beklenir. Düşük tutulmasının
+nedeni: gölge/parlama gerçek nesnenin kontrastını da bir miktar düşürür; kriterin amacı
+"nesne mi değil mi" ayrımı (düz zeminde oran ~0 çıkar), ince ayar değil."""
+
+_DIAGNOSTIC_REJECT_LIMIT = 10
+"""Teşhis çıktısında raporlanacak, eşiğin altında kalmış en iyi aday sayısı."""
+
 _NMS_DIST_THRESH = 2.0
 """Küçük modeller için ALT SINIR (piksel) — asıl kullanılan eşik `_NMS_DIST_FRACTION * model
 yarıçapı`'dır, bkz. `_nms_dist_thresh_for`."""
@@ -107,6 +166,9 @@ aşamasında kullanılan sabit güvenlik tavanı — `max_matches * _CANDIDATE_C
 hesaplanamaz çünkü hedeflenen eşleşme sayısı yok."""
 
 _OVERLAY_COLOR = (0, 255, 0)
+_REJECTED_COLOR = (0, 0, 255)
+"""Teşhis modunda (bkz. `render_match_overlay`'in `rejected` argümanı) eşiğin altında kalmış
+adayların rengi -- kabul edilenlerin yeşiliyle karışmasın diye kırmızı."""
 _TEXT_SCALE_REFERENCE_DIM = 1000.0
 """Font/çizgi kalınlığı bu referans boyuta (px, görüntünün uzun kenarı) göre ölçeklenir —
 `operators/builtin/region_props.py` `draw_measurements_overlay`'deki AYNI desen (gerçek
@@ -164,12 +226,27 @@ class ShapeModel:
     gelir, YANLIŞ bir (0,0) DEĞİL. `operators/builtin/shape_match.py::run()` bunu, bulunan
     nesnenin öğretildiği pozisyondan ne kadar ÖTELENDİĞİNİ (mesafe) hesaplamak için kullanır
     — gerçek kullanıcı isteği: "geometrik eşlemede ... cismin ötelenme uzaklığı da yazmalı"."""
+    interior_points: np.ndarray | None = None
+    """(M, 2) — modelin İÇİNDEN (level-0 noktalarının dışbükey zarfının içinden) örneklenmiş,
+    merkeze göre ofsetler. `exterior_points`/`interior_contrast` ile birlikte "iç bölge
+    doğrulaması" için kullanılır (bkz. `verify_interior`, `_measure_interior_contrast`)."""
+    exterior_points: np.ndarray | None = None
+    """(M, 2) — aynı zarfın DIŞINDAKİ halkadan örneklenmiş ofsetler (arka plan referansı)."""
+    interior_contrast: float | None = None
+    """Eğitim sırasında ölçülen, AYDINLATMADAN BAĞIMSIZ iç/dış kontrast oranı
+    `(ort_iç - ort_dış) / (ort_iç + ort_dış)`. İşareti nesnenin zemine göre KOYU mu AÇIK mı
+    olduğunu taşır; bu yüzden "koyu nesne/açık zemin" gibi sahneye özel bir varsayım YOK --
+    her iki yön de kendi işaretiyle doğru çalışır. `None` ise (bu alandan ÖNCE kaydedilmiş
+    modeller) doğrulama sessizce ATLANIR."""
 
     def to_dict(self) -> dict[str, Any]:
         return {
             "levels": [lvl.to_dict() for lvl in self.levels],
             "corners": self.corners.tolist(),
             "reference_center": list(self.reference_center) if self.reference_center is not None else None,
+            "interior_points": self.interior_points.tolist() if self.interior_points is not None else None,
+            "exterior_points": self.exterior_points.tolist() if self.exterior_points is not None else None,
+            "interior_contrast": self.interior_contrast,
         }
 
     @staticmethod
@@ -179,10 +256,29 @@ class ShapeModel:
         # sessizce YOKSAYILIR, ÇÖKME yok (bkz. modül docstring'i: overlay artık `levels[0].
         # points`'i kullanıyor, eski modeller YENİDEN EĞİTİLMEDEN bundan otomatik faydalanır).
         reference_center_data = data.get("reference_center")
+
+        def _points(key: str) -> np.ndarray | None:
+            raw = data.get(key)
+            if not raw:
+                return None
+            return np.array(raw, dtype=np.float64).reshape(-1, 2)
+
         return ShapeModel(
             levels=[ShapeLevel.from_dict(d) for d in data["levels"]],
             corners=np.array(data["corners"], dtype=np.float64).reshape(-1, 2),
             reference_center=tuple(reference_center_data) if reference_center_data else None,
+            interior_points=_points("interior_points"),
+            exterior_points=_points("exterior_points"),
+            interior_contrast=data.get("interior_contrast"),
+        )
+
+    def supports_interior_verification(self) -> bool:
+        return (
+            self.interior_points is not None
+            and self.exterior_points is not None
+            and self.interior_contrast is not None
+            and self.interior_points.size > 0
+            and self.exterior_points.size > 0
         )
 
 
@@ -251,6 +347,7 @@ def train_shape_model(
     min_gradient_fraction: float = _DEFAULT_MIN_GRADIENT_FRACTION,
     max_points_per_level: int = _DEFAULT_MAX_POINTS_PER_LEVEL,
     mask: np.ndarray | None = None,
+    outer_contour_only: bool = False,
 ) -> ShapeModel:
     """`mask` (opsiyonel): `reference_image` ile AYNI (yükseklik, genişlik) boyutunda bool
     dizi — True olan pikseller model noktası olabilir, False olanlar ROI içinde bile olsa
@@ -267,7 +364,14 @@ def train_shape_model(
     seviyenin nokta sayısı `_AUTO_LEVEL_MIN_POINTS`'in altına düşer düşmez o seviye modele
     DAHİL EDİLMEDEN durulur (en fazla `_AUTO_LEVEL_MAX_LEVELS`'e kadar dener). Tam çözünürlük
     (ilk, `level==0`) seviye HER ZAMAN dahil edilmeye çalışılır (0 nokta bulunursa hâlâ hata
-    verir). Bir TAM SAYI verilirse (varsayılan/manuel davranış) DAVRANIŞ DEĞİŞMEZ."""
+    verir). Bir TAM SAYI verilirse (varsayılan/manuel davranış) DAVRANIŞ DEĞİŞMEZ.
+
+    `outer_contour_only` (opsiyonel): her seviyede SADECE en dıştaki kenar noktaları tutulur
+    (bkz. `_keep_outer_points`). Nesnenin İÇ yapısı (logo, kabartma, parlama/gölgeyle
+    kaybolabilen iç halka) modele hiç girmez -- gerçek kullanıcı sorunu: aynı üründen
+    bazıları bulunurken bazıları bulunamıyordu, çünkü modelin ~%22'si iç halkadaydı ve o
+    halka gölgede kalan ürünlerde görünmüyordu (skor eşiğin hemen altına düşüyordu).
+    Filtre tamamen geometriktir -- daire, yazı, dişli, herhangi bir şekil için çalışır."""
     gray = _to_gray(reference_image)
     roi = roi.clamp(gray.shape[1], gray.shape[0])
     if roi.w < 4 or roi.h < 4:
@@ -308,6 +412,8 @@ def train_shape_model(
                 f"Piramit seviyesi {level}'de yeterli kenar noktası bulunamadı; ROI'de daha "
                 f"belirgin bir kenar/kontur olmalı ya da 'Min. Gradyan Oranı' düşürülmeli{reason}."
             )
+        if outer_contour_only:
+            points, angles = _keep_outer_points(points, angles)
         if auto_levels and level > 0 and points.shape[0] < _AUTO_LEVEL_MIN_POINTS:
             break  # bu seviye çok seyrek -- HALCON'daki gibi modele DAHİL EDİLMEZ, durulur
         levels.append(ShapeLevel(points=points, angles=angles))
@@ -332,7 +438,138 @@ def train_shape_model(
     corners = np.array(
         [[-half_w, -half_h], [half_w, -half_h], [half_w, half_h], [-half_w, half_h]], dtype=np.float64
     )
-    return ShapeModel(levels=levels, corners=corners, reference_center=(cx, cy))
+    interior, exterior, contrast = _build_interior_probe(gray, levels[0].points, cx, cy)
+    return ShapeModel(
+        levels=levels,
+        corners=corners,
+        reference_center=(cx, cy),
+        interior_points=interior,
+        exterior_points=exterior,
+        interior_contrast=contrast,
+    )
+
+
+def _keep_outer_points(points: np.ndarray, angles: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    """Merkez etrafındaki her açısal kutuda SADECE en büyük yarıçaplı noktayı tutar.
+
+    Nesnenin dış hattı, iç yapısının aksine aydınlatmadan/parlamadan bağımsız olarak
+    kararlıdır; iç kenarlar ise sahneye göre görünüp kaybolabilir ve modelin o oranda
+    puanını düşürür. Filtre şekil varsayımı YAPMAZ (dairesellik vb. aranmaz), sadece
+    "merkezden bakınca en dıştaki nokta" kuralını uygular.
+
+    **Bilinen ödünleşim:** DERİN girintili şekillerde (yıldız/dişli gibi, girinti yarıçapı
+    dış yarıçapın %85'inin altına inen) girintideki MEŞRU dış-hat noktaları da elenir --
+    o yöndeki sınır, komşu çıkıntıların yarıçapından hesaplanır. Böyle şekillerde bu
+    seçenek KAPALI bırakılmalıdır; asıl hedefi "iç yapıyı (logo/kabartma/halka) at" olan
+    dışbükeye yakın ürünlerdir."""
+    if points.shape[0] == 0:
+        return points, angles
+    radius = np.linalg.norm(points, axis=1)
+    theta = np.arctan2(points[:, 1], points[:, 0])
+    bins = np.clip(
+        np.floor((theta + np.pi) / (2 * np.pi) * _OUTER_CONTOUR_BINS).astype(int),
+        0,
+        _OUTER_CONTOUR_BINS - 1,
+    )
+
+    # Her açısal kutudaki EN BÜYÜK yarıçap = o yöndeki silüet sınırı.
+    boundary = np.full(_OUTER_CONTOUR_BINS, -np.inf)
+    np.maximum.at(boundary, bins, radius)
+
+    # Kutu başına maksimum TEK BAŞINA yetmiyor: dış hattın hiç örnek düşürmediği bir kutuda
+    # SADECE iç yapıya ait bir nokta varsa, o nokta kendi kutusunun "sınırı" olup kendini
+    # geçerli sayıyordu (ölçüldü: iç kareli test nesnesinde noktaların %17'si hâlâ içeriden
+    # geliyordu). Bu yüzden sınır, KOMŞU kutuların maksimumuyla birlikte değerlendirilir --
+    # penceresi dar tutulur ki yıldız/dişli gibi gerçekten girintili şekillerde girintideki
+    # meşru dış-hat noktaları elenmesin.
+    window = _OUTER_CONTOUR_SMOOTH_BINS
+    padded = np.concatenate([boundary[-window:], boundary, boundary[:window]])
+    boundary = np.array(
+        [padded[i : i + 2 * window + 1].max() for i in range(_OUTER_CONTOUR_BINS)]
+    )
+
+    # Hâlâ tamamen BOŞ kalan kutular (yakınında hiç örnek yok) komşulardan interpolasyonla
+    # doldurulur.
+    known = np.isfinite(boundary)
+    if not known.any():
+        return points, angles
+    idx = np.arange(_OUTER_CONTOUR_BINS)
+    # Dairesel (2*pi'de kapanan) interpolasyon: bilinen kutular üç kopya halinde uzatılır.
+    known_idx = idx[known]
+    known_val = boundary[known]
+    extended_idx = np.concatenate(
+        [known_idx - _OUTER_CONTOUR_BINS, known_idx, known_idx + _OUTER_CONTOUR_BINS]
+    )
+    extended_val = np.concatenate([known_val, known_val, known_val])
+    boundary = np.interp(idx, extended_idx, extended_val)
+
+    keep = radius >= _OUTER_CONTOUR_RADIUS_TOLERANCE * boundary[bins]
+    if not keep.any():
+        return points, angles
+    return points[keep], angles[keep]
+
+
+def _build_interior_probe(
+    gray: np.ndarray, points: np.ndarray, cx: float, cy: float
+) -> tuple[np.ndarray | None, np.ndarray | None, float | None]:
+    """İç bölge doğrulaması için örnekleme noktalarını ve eğitimdeki kontrast oranını üretir.
+
+    Model noktalarının DIŞBÜKEY ZARFI kullanılır: bu, şekilden bağımsız genel bir "nesnenin
+    kapladığı alan" tanımıdır (daire, çok parçalı yazı, dişli -- hepsinde çalışır). İç
+    örnekler zarfın içinden, dış örnekler zarfın `_INTERIOR_PROBE_MARGIN` oranında
+    büyütülmüş halinin DIŞINDA kalan halkadan alınır. Ölçüt, mutlak gri seviye DEĞİL
+    aydınlatmadan bağımsız `(iç-dış)/(iç+dış)` oranıdır."""
+    if points.shape[0] < 3:
+        return None, None, None
+    hull = cv2.convexHull((points + np.array([cx, cy])).astype(np.float32))
+    if hull is None or len(hull) < 3:
+        return None, None, None
+
+    x0, y0, w, h = cv2.boundingRect(hull)
+    pad = int(max(w, h) * _INTERIOR_PROBE_MARGIN) + 2
+    x0, y0 = max(0, x0 - pad), max(0, y0 - pad)
+    x1 = min(gray.shape[1], x0 + w + 2 * pad)
+    y1 = min(gray.shape[0], y0 + h + 2 * pad)
+    if x1 - x0 < 3 or y1 - y0 < 3:
+        return None, None, None
+
+    inside = np.zeros((y1 - y0, x1 - x0), dtype=np.uint8)
+    cv2.fillConvexPoly(inside, (hull - np.array([[x0, y0]], dtype=np.float32)).astype(np.int32), 1)
+    grown = cv2.dilate(inside, np.ones((2 * pad + 1, 2 * pad + 1), np.uint8))
+    shrunk = cv2.erode(inside, np.ones((3, 3), np.uint8))
+    ring = (grown > 0) & (inside == 0)
+
+    interior = _sample_offsets(shrunk > 0, x0, y0, cx, cy)
+    exterior = _sample_offsets(ring, x0, y0, cx, cy)
+    if interior is None or exterior is None:
+        return None, None, None
+
+    gray_f = gray.astype(np.float32)
+    inner_mean = float(gray_f[y0:y1, x0:x1][shrunk > 0].mean())
+    outer_mean = float(gray_f[y0:y1, x0:x1][ring].mean())
+    return interior, exterior, _contrast_ratio(inner_mean, outer_mean)
+
+
+def _sample_offsets(
+    mask: np.ndarray, x0: int, y0: int, cx: float, cy: float
+) -> np.ndarray | None:
+    ys, xs = np.nonzero(mask)
+    if ys.size == 0:
+        return None
+    if ys.size > _INTERIOR_PROBE_SAMPLES:
+        idx = np.linspace(0, ys.size - 1, _INTERIOR_PROBE_SAMPLES).astype(int)
+        ys, xs = ys[idx], xs[idx]
+    return np.stack([xs + x0 - cx, ys + y0 - cy], axis=1).astype(np.float64)
+
+
+def _contrast_ratio(inner_mean: float, outer_mean: float) -> float:
+    """Michelson benzeri, aydınlatma kazancından BAĞIMSIZ oran. Görüntünün tamamı 2x
+    parlarsa hem pay hem payda 2x olur, oran DEĞİŞMEZ -- bu yüzden eğitimdeki ve aramadaki
+    aydınlatma farklı olsa bile karşılaştırılabilir."""
+    denominator = abs(inner_mean) + abs(outer_mean)
+    if denominator < 1e-6:
+        return 0.0
+    return (inner_mean - outer_mean) / denominator
 
 
 def _rotate_points(points: np.ndarray, angle_deg: float) -> np.ndarray:
@@ -409,8 +646,22 @@ def _kernel_cache_for_level(
 
 
 def _score_map(
-    cos_map: np.ndarray, sin_map: np.ndarray, level: ShapeLevel, angle_offset_deg: float, scale: float = 1.0
+    cos_map: np.ndarray,
+    sin_map: np.ndarray,
+    level: ShapeLevel,
+    angle_offset_deg: float,
+    scale: float = 1.0,
+    ignore_polarity: bool = False,
 ) -> np.ndarray:
+    """`ignore_polarity`, HALCON'un `create_shape_model(..., Metric='ignore_global_polarity')`
+    karşılığıdır: skor haritasının MUTLAK değeri alınır. Kontrast TÜMÜYLE ters döndüğünde
+    (koyu bant üzerinde açık ürün <-> açık bant üzerinde koyu ürün; ıslak bant, farklı ürün
+    rengi, arkadan aydınlatma) her model noktasının gradyan yönü tam 180° döner ve skor +1
+    yerine -1'e gider -- yani nesne MÜKEMMEL eşleştiği halde tamamen kaçırılır. Mutlak değer
+    bu iki durumu tek bir eşleşme olarak kabul eder. HALCON'un 'ignore_local_polarity'si
+    (her kenarın AYRI AYRI ters dönebilmesi) bilinçli olarak KAPSAM DIŞI -- o, nokta başına
+    mutlak değer gerektirir ve tek bir `filter2D` ile hesaplanamaz (nesne başına yüzlerce
+    ayrı korelasyon demektir)."""
     cache = _kernel_cache_for_level(level)
     key = (round(angle_offset_deg, 6), round(scale, 6))
     cached = cache.get(key)
@@ -422,7 +673,8 @@ def _score_map(
     kernel_cos, kernel_sin, anchor = cached
     dst_cos = cv2.filter2D(cos_map, -1, kernel_cos, anchor=anchor, borderType=cv2.BORDER_CONSTANT)
     dst_sin = cv2.filter2D(sin_map, -1, kernel_sin, anchor=anchor, borderType=cv2.BORDER_CONSTANT)
-    return (dst_cos + dst_sin) / float(level.points.shape[0])
+    result = (dst_cos + dst_sin) / float(level.points.shape[0])
+    return np.abs(result) if ignore_polarity else result
 
 
 def _local_maxima(score_map: np.ndarray, threshold: float, neighborhood: int = 3) -> list[list[float]]:
@@ -432,9 +684,18 @@ def _local_maxima(score_map: np.ndarray, threshold: float, neighborhood: int = 3
     return [[float(x), float(y), float(score_map[y, x])] for x, y in zip(xs, ys)]
 
 
-def _nms(candidates: list[list[float]], dist_thresh: float) -> list[list[float]]:
+def _nms(
+    candidates: list[list[float]],
+    dist_thresh: float,
+    box_size: tuple[float, float] | None = None,
+    max_overlap: float | None = None,
+) -> list[list[float]]:
     """Konum tabanlı (yalnızca x/y) non-max suppression: `dist_thresh` içindeki adaylardan
     sadece en yüksek skorlu tutulur.
+
+    `max_overlap` VE `box_size` birlikte verilirse bunun yerine HALCON'un `MaxOverlap`
+    kuralı uygulanır (bkz. `_nms_by_overlap`); verilmezse (varsayılan) aşağıdaki mesafe
+    tabanlı davranış BİREBİR korunur.
 
     Açı KASITLI OLARAK bu karşılaştırmaya dahil edilmiyor — eskiden hem konum hem açı yakınlığı
     birlikte aranıyordu, ama kaba/ince arama adımlarının ürettiği küçük açı sapmalarıyla AYNI
@@ -466,6 +727,8 @@ def _nms(candidates: list[list[float]], dist_thresh: float) -> list[list[float]]
     ek yükü ihmal edilebilir (~5 mikrosaniye fark)."""
     if not candidates:
         return []
+    if max_overlap is not None and box_size is not None:
+        return _nms_by_overlap(candidates, box_size, max_overlap)
     cell = dist_thresh if dist_thresh > 0 else 1.0
     grid: dict[tuple[int, int], list[tuple[float, float]]] = {}
     result: list[list[float]] = []
@@ -481,6 +744,53 @@ def _nms(candidates: list[list[float]], dist_thresh: float) -> list[list[float]]
             continue
         result.append(cand)
         grid.setdefault((cell_x, cell_y), []).append((x, y))
+    return result
+
+
+def _nms_by_overlap(
+    candidates: list[list[float]], box_size: tuple[float, float], max_overlap: float
+) -> list[list[float]]:
+    """HALCON'un `find_shape_model(..., MaxOverlap, ...)` karşılığı: iki eşleşmenin
+    (eksene paralel) sınırlayıcı kutularının örtüşme oranı `max_overlap`'i AŞIYORSA düşük
+    skorlu olan elenir.
+
+    Sabit mesafe eşiğinden (`_nms`'in varsayılan yolu, modelin yarıçapının `_NMS_DIST_FRACTION`
+    katı) farkı: eşik modelin GERÇEK boyutuna ve eşleşmenin ÖLÇEĞİNE göre hesaplandığı için
+    yan yana duran/temas eden iki AYRI ürün (ör. bantta bitişik iki paket) artık tek eşleşmeye
+    indirgenmiyor -- kullanıcı `max_overlap` ile "ne kadar üst üste binebilirler" kararını
+    kendisi veriyor. Örtüşme, HALCON gibi KÜÇÜK olan kutunun alanına oranlanır (IoU değil):
+    küçük bir eşleşme büyük bir eşleşmenin İÇİNDE kalıyorsa oran 1.0 olur ve elenir.
+
+    Izgara hızlandırması `_nms`'inkiyle AYNI mantıkta, sadece hücre boyu kutu boyutudur."""
+    box_w, box_h = max(box_size[0], 1e-6), max(box_size[1], 1e-6)
+    cell = max(box_w, box_h)
+    grid: dict[tuple[int, int], list[tuple[float, float, float]]] = {}
+    result: list[list[float]] = []
+    for cand in sorted(candidates, key=lambda c: -c[4]):
+        x, y, scale = cand[0], cand[1], cand[3]
+        w, h = box_w * scale, box_h * scale
+        cell_x, cell_y = int(x // cell), int(y // cell)
+        suppressed = False
+        for gx in (cell_x - 1, cell_x, cell_x + 1):
+            for gy in (cell_y - 1, cell_y, cell_y + 1):
+                for rx, ry, r_scale in grid.get((gx, gy), ()):
+                    rw, rh = box_w * r_scale, box_h * r_scale
+                    inter_w = min(x + w / 2, rx + rw / 2) - max(x - w / 2, rx - rw / 2)
+                    inter_h = min(y + h / 2, ry + rh / 2) - max(y - h / 2, ry - rh / 2)
+                    if inter_w <= 0 or inter_h <= 0:
+                        continue
+                    smaller_area = min(w * h, rw * rh)
+                    if smaller_area > 0 and (inter_w * inter_h) / smaller_area > max_overlap:
+                        suppressed = True
+                        break
+                if suppressed:
+                    break
+            if suppressed:
+                break
+        if suppressed:
+            continue
+        result.append(cand)
+        grid.setdefault((cell_x, cell_y), []).append((x, y, scale))
     return result
 
 
@@ -504,6 +814,7 @@ def _coarse_search(
     angle_step: float,
     relaxed_min: float,
     scale_values: list[float],
+    ignore_polarity: bool = False,
 ) -> list[list[float]]:
     candidates: list[list[float]] = []
     n_steps = max(1, int(round(angle_extent / angle_step)))
@@ -512,7 +823,7 @@ def _coarse_search(
             angle = angle_start + i * angle_step
             if angle > angle_start + angle_extent + 1e-6:
                 break
-            score_map = _score_map(cos_map, sin_map, level, angle, scale)
+            score_map = _score_map(cos_map, sin_map, level, angle, scale, ignore_polarity)
             for x, y, score in _local_maxima(score_map, relaxed_min):
                 candidates.append([x, y, angle, scale, score])
     return candidates
@@ -541,6 +852,8 @@ def _refine_candidate(
     angle_step: float,
     scale_window: float = 0.0,
     scale_step: float = 0.0,
+    ignore_polarity: bool = False,
+    subpixel: bool = False,
 ) -> list[float]:
     """`scale_window <= 0` (ölçek araması kapalı, varsayılan) iken SADECE `scale0` denenir --
     eskisiyle BİREBİR aynı maliyet/davranış. Açıksa (bkz. `find_shape_model`'in `scale_min`/
@@ -563,11 +876,18 @@ def _refine_candidate(
         [scale0] if scale_window <= 0 else _frange(scale0 - scale_window, scale0 + scale_window, scale_step)
     )
 
+    # Subpiksel/subadım iyileştirme için: en iyi sonucu veren skor haritası ve o haritadaki
+    # (yerel) tepe konumu, artı HER açı için o açının en iyi skoru (açı parabolü için).
+    best_patch: np.ndarray | None = None
+    best_peak: tuple[int, int] = (0, 0)
+    angle_scores: list[tuple[float, float]] = []
+
     angle = angle0 - angle_window
     end_angle = angle0 + angle_window + 1e-6
     while angle <= end_angle:
+        angle_best = -1.0
         for scale in scale_values:
-            score_patch = _score_map(cos_patch, sin_patch, level, angle, scale)
+            score_patch = _score_map(cos_patch, sin_patch, level, angle, scale, ignore_polarity)
             ry_lo = max(0, int(local_y0 - xy_radius))
             ry_hi = min(score_patch.shape[0], int(local_y0 + xy_radius) + 1)
             rx_lo = max(0, int(local_x0 - xy_radius))
@@ -576,6 +896,7 @@ def _refine_candidate(
                 sub = score_patch[ry_lo:ry_hi, rx_lo:rx_hi]
                 idx = np.unravel_index(int(np.argmax(sub)), sub.shape)
                 score = float(sub[idx])
+                angle_best = max(angle_best, score)
                 if score > best[4]:
                     best = [
                         float(x_lo + rx_lo + idx[1]),
@@ -584,8 +905,114 @@ def _refine_candidate(
                         float(scale),
                         score,
                     ]
+                    best_patch = score_patch
+                    best_peak = (ry_lo + int(idx[0]), rx_lo + int(idx[1]))
+        if angle_best >= 0.0:
+            angle_scores.append((float(angle), angle_best))
         angle += angle_step
+
+    if subpixel and best_patch is not None:
+        dx, dy = _parabolic_peak_offset(best_patch, best_peak)
+        best[0] += dx
+        best[1] += dy
+        best[2] += _parabolic_angle_offset(angle_scores, best[2])
     return best
+
+
+def _parabola_vertex(left: float, center: float, right: float) -> float:
+    """Eşit aralıklı üç örneğe parabol uydurup tepe noktasının merkeze göre (-1..+1 arası)
+    kaymasını döndürür. Ayrık bir maksimum, gerçek (sürekli) tepe noktasının en fazla yarım
+    örnek uzağındadır; bu klasik 3 nokta interpolasyonu HALCON'un `SubPixel='interpolation'`
+    modunun yaptığı işin aynısıdır."""
+    denom = left - 2.0 * center + right
+    if abs(denom) < 1e-12:
+        return 0.0
+    offset = 0.5 * (left - right) / denom
+    return float(np.clip(offset, -1.0, 1.0))
+
+
+def _parabolic_peak_offset(patch: np.ndarray, peak: tuple[int, int]) -> tuple[float, float]:
+    """Skor haritasındaki tam sayı tepe noktası etrafında x ve y eksenlerinde ayrı ayrı
+    parabol uydurur. Kenarda (komşusu olmayan) bir tepe için ilgili eksende 0 döner."""
+    py, px = peak
+    h, w = patch.shape
+    dx = 0.0
+    dy = 0.0
+    if 0 < px < w - 1:
+        dx = _parabola_vertex(float(patch[py, px - 1]), float(patch[py, px]), float(patch[py, px + 1]))
+    if 0 < py < h - 1:
+        dy = _parabola_vertex(float(patch[py - 1, px]), float(patch[py, px]), float(patch[py + 1, px]))
+    return dx, dy
+
+
+def _parabolic_angle_offset(angle_scores: list[tuple[float, float]], best_angle: float) -> float:
+    """Denenen açıların en iyi skorlarına, en iyi açının etrafında parabol uydurur -- açıyı
+    arama ızgarasının adımından daha ince çözer (konum subpikseliyle AYNI mantık)."""
+    if len(angle_scores) < 3:
+        return 0.0
+    index = min(range(len(angle_scores)), key=lambda i: abs(angle_scores[i][0] - best_angle))
+    if index == 0 or index == len(angle_scores) - 1:
+        return 0.0
+    step = angle_scores[index + 1][0] - angle_scores[index][0]
+    offset = _parabola_vertex(
+        angle_scores[index - 1][1], angle_scores[index][1], angle_scores[index + 1][1]
+    )
+    return offset * step
+
+
+def _measure_interior_contrast(
+    gray: np.ndarray, model: ShapeModel, x: float, y: float, angle_deg: float, scale: float
+) -> float | None:
+    """Bir ADAY pozda, arama görüntüsünde iç/dış kontrast oranını ölçer (eğitimdekiyle AYNI
+    tanım). Örnekleme noktaları aday poza (döndürme + ölçek + öteleme) taşınır; görüntü
+    dışına düşenler atılır. Yeterli örnek kalmazsa `None` döner (doğrulama yapılamaz ->
+    aday elenmez, çünkü bilgi yokluğu bir RED gerekçesi değildir)."""
+    if not model.supports_interior_verification():
+        return None
+    h, w = gray.shape[:2]
+
+    def _mean_at(offsets: np.ndarray) -> float | None:
+        pts = _rotate_points(offsets * scale, angle_deg) + np.array([x, y])
+        cols = np.rint(pts[:, 0]).astype(int)
+        rows = np.rint(pts[:, 1]).astype(int)
+        valid = (cols >= 0) & (cols < w) & (rows >= 0) & (rows < h)
+        if valid.sum() < _MIN_PROBE_SAMPLES:
+            return None
+        return float(gray[rows[valid], cols[valid]].mean())
+
+    inner = _mean_at(model.interior_points)
+    outer = _mean_at(model.exterior_points)
+    if inner is None or outer is None:
+        return None
+    return _contrast_ratio(inner, outer)
+
+
+def _passes_interior_verification(
+    gray: np.ndarray, model: ShapeModel, candidate: list[float], tolerance: float
+) -> bool:
+    """Skordan BAĞIMSIZ ikinci kabul kriteri (HALCON'un clutter/kontrol bölgesi mantığının
+    genel karşılığı). Gerçek kullanıcı raporu: "güven faktörünü düşürünce başka yerleri
+    seçiyor" -- eşiği düşürmek gerçek nesneleri getirirken düz/gürültülü zeminde de
+    eşleşmeler üretiyordu. Bu kriter, aday konumun gerçekten nesnenin ÖĞRETİLDİĞİ
+    iç/dış kontrast ilişkisine sahip olmasını arar: düz beyaz kağıt üzerindeki bir aday,
+    iç ve dış bölgesi aynı parlaklıkta olduğu için (oran ~0) elenir.
+
+    Model bu bilgiyi taşımıyorsa (eski `.json`) ya da ölçüm yapılamıyorsa aday KABUL edilir --
+    doğrulama yalnızca elemek için vardır, asla yeni eşleşme uydurmaz."""
+    measured = _measure_interior_contrast(
+        gray, model, candidate[0], candidate[1], candidate[2], candidate[3]
+    )
+    if measured is None or model.interior_contrast is None:
+        return True
+    expected = model.interior_contrast
+    if abs(expected) < 1e-6:
+        # Eğitimde iç/dış farkı zaten yoktu -- ayırt edici bilgi yok, eleme yapma.
+        return True
+    # İŞARET eğitimdekiyle aynı olmalı (koyu nesne koyu, açık nesne açık kalmalı) VE
+    # büyüklük eğitimdekinin en az `tolerance` katı olmalı.
+    if measured * expected <= 0:
+        return False
+    return abs(measured) >= tolerance * abs(expected)
 
 
 def _nms_dist_thresh_for(model: ShapeModel) -> float:
@@ -593,20 +1020,34 @@ def _nms_dist_thresh_for(model: ShapeModel) -> float:
     return max(_NMS_DIST_THRESH, _NMS_DIST_FRACTION * model_radius)
 
 
-def _build_target_pyramid(gray: np.ndarray, num_levels: int) -> list[tuple[np.ndarray, np.ndarray]]:
+def _build_target_pyramid(
+    gray: np.ndarray, num_levels: int, min_contrast: float = _DEFAULT_MIN_CONTRAST
+) -> list[tuple[np.ndarray, np.ndarray]]:
     target_levels: list[tuple[np.ndarray, np.ndarray]] = []
     level_image = gray
+    mag_threshold = max(0.0, min_contrast) * _SOBEL_GRADIENT_SCALE
     for level in range(num_levels):
         gx = cv2.Sobel(level_image, cv2.CV_32F, 1, 0, ksize=3)
         gy = cv2.Sobel(level_image, cv2.CV_32F, 0, 1, ksize=3)
         angle_map = np.arctan2(gy, gx)
-        target_levels.append((np.cos(angle_map).astype(np.float32), np.sin(angle_map).astype(np.float32)))
+        cos_map = np.cos(angle_map).astype(np.float32)
+        sin_map = np.sin(angle_map).astype(np.float32)
+        if mag_threshold > 0.0:
+            # HALCON'un MinContrast'ı (bkz. `_DEFAULT_MIN_CONTRAST`): eşiğin altındaki
+            # pikseller puanlamaya HİÇ katılmaz (0 katkı) -- yanlış yönlü bir kenar gibi
+            # NEGATİF puan almazlar, sadece görünmez olurlar.
+            weak = cv2.magnitude(gx, gy) < mag_threshold
+            cos_map[weak] = 0.0
+            sin_map[weak] = 0.0
+        target_levels.append((cos_map, sin_map))
         if level < num_levels - 1:
             level_image = cv2.pyrDown(level_image)
     return target_levels
 
 
-def build_search_pyramid(search_image: np.ndarray, num_levels: int) -> list[tuple[np.ndarray, np.ndarray]]:
+def build_search_pyramid(
+    search_image: np.ndarray, num_levels: int, min_contrast: float = _DEFAULT_MIN_CONTRAST
+) -> list[tuple[np.ndarray, np.ndarray]]:
     """`find_shape_model`'in `target_pyramid` argümanına verilebilecek, arama görüntüsünün
     gradyan-yön haritalarının piramidini kurar. AYNI arama görüntüsü üzerinde BİRDEN FAZLA
     model aranırken (`geom.shape_match`'in `model_names` çoklu-seçimi, gerçek kullanıcı
@@ -619,7 +1060,24 @@ def build_search_pyramid(search_image: np.ndarray, num_levels: int) -> list[tupl
     (her seviye SADECE bir öncekinden `pyrDown` ile türetilir, sonraki seviyeler önceki
     seviyeleri hiç ETKİLEMEZ)."""
     gray = _to_gray(search_image).astype(np.float32)
-    return _build_target_pyramid(gray, num_levels)
+    return _build_target_pyramid(gray, num_levels, min_contrast)
+
+
+def coarse_search_level(model: ShapeModel, last_level: int = 0) -> int:
+    """Aday üretiminin (kaba aramanın) yapılacağı piramit seviyesi.
+
+    En kaba seviyeden başlanır ama nokta sayısı `_MIN_COARSE_LEVEL_POINTS`'in altındaki
+    seviyeler ATLANIR (bkz. o sabitin gerekçesi: aşırı kaba seviyelerde gürültü tabanı
+    gerçek eşleşmelerin skoruna yaklaşıp onları aday listesinden taşırıyor ve nesne
+    kaçırılıyordu). Hiçbir seviye eşiği geçmezse `last_level` döner -- yani küçük/az kenarlı
+    modellerde davranış eskisi gibi kalır.
+
+    `operators/builtin/shape_match.py` bunu, birden fazla model için PAYLAŞILAN piramidi
+    gereğinden derin kurmamak için de kullanır."""
+    level = len(model.levels) - 1
+    while level > last_level and model.levels[level].points.shape[0] < _MIN_COARSE_LEVEL_POINTS:
+        level -= 1
+    return level
 
 
 def find_shape_model(
@@ -636,6 +1094,14 @@ def find_shape_model(
     scale_min: float = _DEFAULT_SCALE_MIN,
     scale_max: float = _DEFAULT_SCALE_MAX,
     scale_step_coarse: float = _DEFAULT_SCALE_STEP_COARSE,
+    min_contrast: float = _DEFAULT_MIN_CONTRAST,
+    ignore_polarity: bool = False,
+    subpixel: bool = True,
+    last_level: int = 0,
+    max_overlap: float | None = None,
+    verify_interior: bool = False,
+    verify_tolerance: float = _DEFAULT_VERIFY_TOLERANCE,
+    diagnostics: dict[str, Any] | None = None,
 ) -> list[MatchResult]:
     """`max_matches=None` ise (otomatik mod) `min_score` üstündeki TÜM eşleşmeler döndürülür
     (dahili bir güvenlik tavanına kadar, bkz. `_AUTO_CANDIDATE_CARRY_LIMIT`); bir tam sayı
@@ -658,14 +1124,55 @@ def find_shape_model(
     çarpar -- kullanıcı geniş bir aralık seçerse yavaşlar), sonra `angle_window`'un narrowlanma
     deseninin AYNISıyla (`_REFINE_SCALE_DIVISOR`) her piramit seviyesinde daraltılarak
     iyileştirilir. `MatchResult.scale` bulunan nesnenin öğretilen modele göre ölçeğidir (1.0 =
-    öğretildiği boyutta)."""
+    öğretildiği boyutta).
+
+    HALCON kökenli dört ek parametre (hepsi geriye dönük güvenli varsayılanlarla):
+    - `min_contrast` (HALCON `create_shape_model` MinContrast): bkz. `_DEFAULT_MIN_CONTRAST`.
+      SADECE `target_pyramid` verilmediğinde burada uygulanır -- hazır bir piramit geçilirse
+      eşik zaten onu kuran `build_search_pyramid` çağrısında uygulanmıştır.
+    - `ignore_polarity` (HALCON Metric='ignore_global_polarity'): bkz. `_score_map`.
+    - `subpixel` (HALCON SubPixel='interpolation'): son seviyede skor haritasına parabol
+      uydurarak konumu ve açıyı ızgara adımından daha ince çözer. Maliyeti ihmal edilebilir
+      (eşleşme başına birkaç aritmetik işlem), bu yüzden varsayılan AÇIK.
+    - `last_level` (HALCON `find_shape_model`'in NumLevels'ının "son seviye" bileşeni):
+      iyileştirme bu piramit seviyesinde DURUR (0 = tam çözünürlük, varsayılan). 1 vermek
+      iyileştirmeyi yaklaşık 4 kat ucuzlatır (bir üst seviyede dörtte bir piksel var) ama
+      konum çözünürlüğü de o kadar kabalaşır -- sonuçlar yine tam çözünürlük koordinatlarına
+      ölçeklenerek döndürülür.
+    - `max_overlap` (HALCON MaxOverlap): bkz. `_nms_by_overlap`. `None` (varsayılan) iken
+      eski mesafe tabanlı bastırma korunur.
+
+    `verify_interior`/`verify_tolerance`: skordan BAĞIMSIZ ikinci kabul kriteri, bkz.
+    `_passes_interior_verification`. Modelin bu bilgiyi taşımadığı (eski `.json`) durumda
+    sessizce ATLANIR.
+
+    `diagnostics` verilirse (bir sözlük) doldurulur: `best_score` (eşiğin altında kalsa
+    bile en iyi aday skoru), `rejected` (en iyi N reddedilmiş aday, her biri
+    `{"x","y","angle","scale","score","reason"}` — `reason` "skor" ya da "dogrulama"),
+    `verified` (doğrulamanın gerçekten UYGULANIP uygulanmadığı). Kullanıcı "neden
+    bulunamadı"yı görebilsin diye: eşiği körlemesine düşürmek yerine gerçek nesnelerle
+    yanlış pozitifler arasında ayıran bir eşik VAR MI, görerek karar verilir."""
     num_levels = len(model.levels)
+    last_level = max(0, min(last_level, num_levels - 1))
     nms_dist_thresh = _nms_dist_thresh_for(model)
+    if model.corners.size:
+        box_size = (
+            float(model.corners[:, 0].max() - model.corners[:, 0].min()),
+            float(model.corners[:, 1].max() - model.corners[:, 1].min()),
+        )
+    else:
+        box_size = None
     scale_values = [scale_min] if scale_max <= scale_min else _frange(scale_min, scale_max, scale_step_coarse)
     scale_window = scale_step_coarse if scale_max > scale_min else 0.0
 
-    if target_pyramid is not None and len(target_pyramid) >= num_levels:
-        target_levels = target_pyramid[:num_levels]
+    # Kaba arama seviyesi SADECE modele bağlı olduğundan piramitten ÖNCE hesaplanabilir --
+    # böylece kullanılmayacak (çok kaba) seviyeler hiç kurulmaz (ölçüldü: 5 seviyeli bir
+    # modelde gereksiz iki seviyenin kurulması ~85ms).
+    coarsest = coarse_search_level(model, last_level)
+    needed_levels = coarsest + 1
+
+    if target_pyramid is not None and len(target_pyramid) >= needed_levels:
+        target_levels = target_pyramid[:needed_levels]
     else:
         # `gray` SADECE bu dalda gerekli -- `target_pyramid` çağıran tarafından (operatörün
         # `geom.shape_match::run()`'ı, BİRDEN FAZLA model seçiliyken her model için AYNI
@@ -674,15 +1181,14 @@ def find_shape_model(
         # gerçek kullanıcı raporu: "şekil bul çok kasıyor" (bkz. `build_search_pyramid`
         # docstring'i, AYNI kökten gelen bir önceki perf düzeltmesiyle aynı gerekçe).
         gray = _to_gray(search_image).astype(np.float32)
-        target_levels = _build_target_pyramid(gray, num_levels)
+        target_levels = _build_target_pyramid(gray, needed_levels, min_contrast)
 
-    coarsest = num_levels - 1
     cos_map, sin_map = target_levels[coarsest]
     relaxed_min = min_score * max(greediness, 1e-6) * _COARSE_ACCEPT_LOOSENING
 
     candidates = _coarse_search(
         cos_map, sin_map, model.levels[coarsest], angle_start, angle_extent, angle_step_coarse, relaxed_min,
-        scale_values,
+        scale_values, ignore_polarity,
     )
     candidates = _nms(candidates, nms_dist_thresh)
     candidates.sort(key=lambda c: -c[4])
@@ -694,7 +1200,7 @@ def find_shape_model(
     candidates = candidates[:carry_limit]
 
     angle_window = angle_step_coarse
-    for level in range(coarsest - 1, -1, -1):
+    for level in range(coarsest - 1, last_level - 1, -1):
         cos_map, sin_map = target_levels[level]
         angle_step = max(angle_window / _REFINE_ANGLE_DIVISOR, 0.1)
         scale_step = max(scale_window / _REFINE_SCALE_DIVISOR, _MIN_SCALE_STEP) if scale_window > 0 else 0.0
@@ -703,6 +1209,11 @@ def find_shape_model(
                 cos_map, sin_map, model.levels[level], x * 2, y * 2, angle, scale,
                 xy_radius=_REFINE_XY_RADIUS, angle_window=angle_window, angle_step=angle_step,
                 scale_window=scale_window, scale_step=scale_step,
+                ignore_polarity=ignore_polarity,
+                # Subpiksel SADECE en son (artık daha ince olmayacak) seviyede uygulanır --
+                # ara seviyelerde uygulamak anlamsız olurdu (sonuç zaten `*2` ile bir sonraki
+                # seviyeye taşınıp yeniden aranıyor).
+                subpixel=subpixel and level == last_level,
             )
             for x, y, angle, scale, _score in candidates
         ]
@@ -710,14 +1221,53 @@ def find_shape_model(
         if scale_window > 0:
             scale_window = max(scale_window / _REFINE_SCALE_DIVISOR, _MIN_SCALE_STEP)
 
-    candidates = [c for c in candidates if c[4] >= min_score]
-    candidates = _nms(candidates, nms_dist_thresh)
-    candidates.sort(key=lambda c: -c[4])
+    # `last_level > 0` iken koordinatlar hâlâ o seviyenin (küçültülmüş) ızgarasında --
+    # bastırma eşikleri, doğrulama ve döndürülen sonuçlar TAM ÇÖZÜNÜRLÜK cinsindendir, bu
+    # yüzden ELEMEDEN ÖNCE ölçekle geri taşınırlar (doğrulama tam çözünürlüklü gri görüntüde
+    # örnekleme yapıyor).
+    level_scale = float(2**last_level)
+    if level_scale != 1.0:
+        candidates = [[x * level_scale, y * level_scale, a, s, sc] for x, y, a, s, sc in candidates]
+
+    above_threshold = [c for c in candidates if c[4] >= min_score]
+    rejected: list[tuple[list[float], str]] = [(c, "skor") for c in candidates if c[4] < min_score]
+
+    verification_applied = verify_interior and model.supports_interior_verification()
+    if verification_applied:
+        verify_gray = _to_gray(search_image).astype(np.float32)
+        kept: list[list[float]] = []
+        for candidate in above_threshold:
+            if _passes_interior_verification(verify_gray, model, candidate, verify_tolerance):
+                kept.append(candidate)
+            else:
+                rejected.append((candidate, "dogrulama"))
+        above_threshold = kept
+
+    accepted = _nms(above_threshold, nms_dist_thresh, box_size, max_overlap)
+    accepted.sort(key=lambda c: -c[4])
     if max_matches is not None:
-        candidates = candidates[:max_matches]
+        accepted = accepted[:max_matches]
+
+    if diagnostics is not None:
+        best_score = max((c[4] for c in candidates), default=None)
+        rejected.sort(key=lambda item: -item[0][4])
+        diagnostics["best_score"] = best_score
+        diagnostics["verified"] = verification_applied
+        diagnostics["rejected"] = [
+            {
+                "x": c[0],
+                "y": c[1],
+                "angle": _normalize_angle(c[2]),
+                "scale": c[3],
+                "score": c[4],
+                "reason": reason,
+            }
+            for c, reason in rejected[:_DIAGNOSTIC_REJECT_LIMIT]
+        ]
+
     return [
         MatchResult(x=x, y=y, angle=_normalize_angle(angle), scale=scale, score=score)
-        for x, y, angle, scale, score in candidates
+        for x, y, angle, scale, score in accepted
     ]
 
 
@@ -732,7 +1282,11 @@ class LabeledMatch:
     match: MatchResult
 
 
-def render_match_overlay(search_image: np.ndarray, entries: list[LabeledMatch]) -> np.ndarray:
+def render_match_overlay(
+    search_image: np.ndarray,
+    entries: list[LabeledMatch],
+    rejected: list[dict[str, Any]] | None = None,
+) -> np.ndarray:
     """Her eşleşmeyi kontur+eksen+SADECE numarasıyla (`entry.label`, ör. "1", "2") işaretler
     — tam (x,y,alpha) değerleri artık burada DEĞİL, ayrı bir tabloda (bkz.
     `ui/widgets/measurements_summary.py`) numaraya göre listelenir (gerçek kullanıcı isteği:
@@ -744,7 +1298,14 @@ def render_match_overlay(search_image: np.ndarray, entries: list[LabeledMatch]) 
     overlay'in TABANI olarak burada da gri kullanmak orijinal renkli görüntüyü/kamerayı
     kaybediyordu (gerçek kullanıcı raporu: "kamerayı siyah-beyaza çeviriyor") -- `ml.onnx_
     detect`'in `render_detection_overlay`'i ile AYNI desen: girdi zaten renkliyse (3 kanal)
-    OLDUĞU GİBİ kullan, SADECE tek kanallıysa (2 boyutlu) BGR'ye çevir."""
+    OLDUĞU GİBİ kullan, SADECE tek kanallıysa (2 boyutlu) BGR'ye çevir.
+
+    `rejected` (opsiyonel, bkz. `find_shape_model`'in `diagnostics`'i): eşiğin altında
+    kalmış ya da iç bölge doğrulamasından geçememiş adaylar KIRMIZI bir çarpı + skoruyla
+    çizilir. Kabul edilen eşleşmelerle karışmaması için kontur noktaları çizilmez, sadece
+    konum işaretlenir. Amaç: kullanıcı "neden bulunamadı"yı GÖREREK anlasın -- gerçek
+    kullanıcı raporu: "güven faktörünü düşürünce başka yerleri seçiyor" (eşiği körlemesine
+    düşürmek yerine gerçek nesnelerle yanlış adayların skorları KARŞILAŞTIRILABİLİR olmalı)."""
     overlay = np.ascontiguousarray(search_image).copy()
     if overlay.ndim == 2:
         overlay = cv2.cvtColor(overlay, cv2.COLOR_GRAY2BGR)
@@ -788,6 +1349,23 @@ def render_match_overlay(search_image: np.ndarray, entries: list[LabeledMatch]) 
             cv2.FONT_HERSHEY_SIMPLEX,
             font_scale,
             _OVERLAY_COLOR,
+            text_thickness,
+            cv2.LINE_AA,
+        )
+
+    for candidate in rejected or []:
+        center = (int(round(candidate["x"])), int(round(candidate["y"])))
+        cv2.drawMarker(
+            overlay, center, _REJECTED_COLOR, markerType=cv2.MARKER_TILTED_CROSS,
+            markerSize=marker_size, thickness=contour_thickness,
+        )
+        cv2.putText(
+            overlay,
+            f"{candidate['score']:.2f}",
+            (center[0] + 8, max(12, center[1] - 8)),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            font_scale,
+            _REJECTED_COLOR,
             text_thickness,
             cv2.LINE_AA,
         )

@@ -31,6 +31,7 @@ from PySide6.QtWidgets import (
     QProgressDialog,
     QPushButton,
     QScrollArea,
+    QSizePolicy,
     QSplitter,
     QTabWidget,
     QVBoxLayout,
@@ -267,6 +268,55 @@ def _cumulative_roi_offset(graph: Graph, pipeline_order: list[str], target_node_
     return offset_x, offset_y
 
 
+_ROI_CONTEXT_BORDER_COLOR = (0, 200, 255)
+""""ROI Bağlamda" görünümünde işlenmiş bölgenin sınırını gösteren çerçeve rengi (turuncu-sarı)
+-- ölçüm overlay'lerinin yeşil/kırmızısıyla karışmasın diye ayrı bir ton."""
+_ROI_CONTEXT_BORDER_PX = 2
+
+
+def _paste_filtered_into_frame(
+    normal_base: np.ndarray | None,
+    filtered_image: np.ndarray | None,
+    graph: Graph,
+    pipeline_order: list[str],
+    node_id: str | None,
+) -> np.ndarray | None:
+    """Filtrelenmiş (ROI ile KIRPILMIŞ) sonucu, ham tam karenin İÇİNE kendi yerine yapıştırır.
+
+    Gerçek kullanıcı isteği: "ROI uygulayınca başka filtreye geçince sadece ROI alanı
+    görünüyor, ben ROI dışında kalan alanı da görmek istiyorum -- işlemli ve işlemsiz bölgeyi
+    görmüş olurum böylece." "Filtrelenmiş" modu yalnızca kırpımı, "Normal" modu yalnızca ham
+    kareyi gösteriyordu; bu mod ikisini TEK karede birleştirir.
+
+    Zincirdeki `roi.region` adımlarının toplam ofseti (`_cumulative_roi_offset`, MEVCUT)
+    yapıştırma konumunu verir. Filtrelenmiş görüntü ham kareyle AYNI boyuttaysa (zincirde ROI
+    yok ya da kırpma kapalı) yapıştırmanın anlamı kalmaz ve `None` dönülür -- çağıran taraf
+    normal "filtrelenmiş" davranışına düşer. Tek kanallı (ör. eşikleme) çıktı, renkli tam
+    kareye yapıştırılabilmesi için BGR'ye çevrilir."""
+    if normal_base is None or filtered_image is None or node_id is None:
+        return None
+    offset_x, offset_y = _cumulative_roi_offset(graph, pipeline_order, node_id)
+    base = np.ascontiguousarray(normal_base).copy()
+    if base.ndim == 2:
+        base = cv2.cvtColor(base, cv2.COLOR_GRAY2BGR)
+    patch = filtered_image
+    if patch.ndim == 2:
+        patch = cv2.cvtColor(patch, cv2.COLOR_GRAY2BGR)
+    if patch.shape[:2] == base.shape[:2] and offset_x == 0 and offset_y == 0:
+        return None  # kırpma yok -- "Filtrelenmiş" ile aynı olurdu
+
+    h, w = patch.shape[:2]
+    y0, x0 = max(0, offset_y), max(0, offset_x)
+    y1, x1 = min(base.shape[0], y0 + h), min(base.shape[1], x0 + w)
+    if y1 <= y0 or x1 <= x0:
+        return None
+    base[y0:y1, x0:x1] = patch[: y1 - y0, : x1 - x0]
+    cv2.rectangle(
+        base, (x0, y0), (x1 - 1, y1 - 1), _ROI_CONTEXT_BORDER_COLOR, _ROI_CONTEXT_BORDER_PX
+    )
+    return base
+
+
 def _compose_display_image(
     filtered_image: np.ndarray | None,
     measurements: list[dict[str, Any]] | None,
@@ -340,6 +390,20 @@ def _compose_display_image(
             return None, None
         filtered_capped, filtered_scale = _cap_preview_size_with_scale(filtered_image)
         return filtered_capped, _scale_measurements_for_display(measurements, filtered_scale)
+
+    if view_mode == "in_context":
+        composed = _paste_filtered_into_frame(
+            normal_base, filtered_image, graph, pipeline_order, node_id
+        )
+        if composed is None:
+            if filtered_image is None:
+                return normal_capped, _scale_measurements_for_display(measurements, normal_scale)
+            capped, scale = _cap_preview_size_with_scale(filtered_image)
+            return capped, _scale_measurements_for_display(measurements, scale)
+        if measurements:
+            composed = draw_measurements_overlay(composed, measurements, mm_per_px)
+        capped, scale = _cap_preview_size_with_scale(composed)
+        return capped, _scale_measurements_for_display(measurements, scale)
 
     # "both" -- bkz. yukarıdaki docstring, üzerine gelme bilgisi desteklenmez.
     filtered_capped = _cap_preview_size(filtered_image) if filtered_image is not None else None
@@ -699,6 +763,22 @@ class MainWindow(QMainWindow):
         self._param_debounce_timer = QTimer(self)
         self._param_debounce_timer.setSingleShot(True)
         self._param_debounce_timer.timeout.connect(self._flush_pending_params)
+        # `_on_right_tabs_changed`'in "bir sonraki olay turunda bölme boyutlarını geri uygula"
+        # gecikmesi. Eskiden `QTimer.singleShot(0, self, lambda ...)` (bağlam nesnesi
+        # aşırı yüklemesi) kullanılıyordu; PySide bu bağlantıyı kendi dahili "global
+        # receiver" nesnesi üzerinden kurduğundan, bağlam (MainWindow) yok edildiğinde
+        # BEKLEYEN atış her zaman güvenilir biçimde iptal EDİLMİYOR ve daha sonra ölü
+        # pencerede slot aranıp "AttributeError: Slot 'MainWindow::' not found" üretiliyordu.
+        # `self`'in ÇOCUĞU olan gerçek bir QTimer, pencere yok edilirken Qt tarafından
+        # deterministik olarak yok edilir -- bekleyen atış kesin olarak düşer.
+        self._splitter_restore_timer = QTimer(self)
+        self._splitter_restore_timer.setSingleShot(True)
+        self._splitter_restore_timer.timeout.connect(self._restore_splitter_sizes)
+        self._pending_splitter_sizes: list[int] | None = None
+        self._tracked_dialogs: list[Any] = []
+        """`destroyed` sinyaline bağlanmış TÜM dialoglar (yalnızca o an izlenen tekil
+        referanslar değil, `deleteLater()` ile yok edilmeyi BEKLEYEN eskiler de). Bkz.
+        `_connect_destroyed`/`closeEvent`."""
         self._lens_calibration_dialog: LensCalibrationDialog | None = None
         self._active_lens_profile: LensProfile | None = None
         self._height_scale_model: HeightScaleModel | None = None
@@ -755,8 +835,22 @@ class MainWindow(QMainWindow):
         self.image_view = RoiCanvas()
         self.image_view.setAcceptDrops(True)
         self.status_label = QLabel("")
+        # `camera_settings_panel._status_label` ile AYNI gerekçe/desen: bu etiket uzun
+        # hata/durum metinleri gösteriyor (ör. "Hata: Node 'flat_field' ... çalıştırılırken
+        # ...") ve sarmasız bir QLabel'ın minimumSizeHint'i TÜM metnin genişliğine eşit
+        # oluyordu -- ölçüldü: tek bir hata mesajı ORTA panelin minimum genişliğini
+        # 1010px'ten 1314px'e, pencerenin talebini de aynı oranda büyütüyordu (gerçek
+        # kullanıcı raporu: "gereksiz sayfa büyümeleri"). `setWordWrap` TEK BAŞINA yetmez
+        # (boşluksuz uzun tek bir "kelime" -- ör. bir dosya yolu -- bölünemez), bu yüzden
+        # yatay `QSizePolicy.Ignored`: layout bu widget'ın genişlik talebini TAMAMEN yok
+        # sayar, metin mevcut alana göre sarar ama panelin minimumunu ASLA büyütmez.
+        self.status_label.setWordWrap(True)
+        self.status_label.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
         self.hover_info_label = QLabel("Fareyi bir nesnenin üzerine getirin.")
         self.hover_info_label.setWordWrap(True)
+        self.hover_info_label.setSizePolicy(
+            QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred
+        )
         self.hover_info_label.setStyleSheet("color: #ccc; background-color: #2a2a2a; padding: 4px;")
 
         self.operator_library.operator_checked.connect(self.add_operator)
@@ -985,12 +1079,15 @@ class MainWindow(QMainWindow):
         self.view_mode_combo = QComboBox()
         self.view_mode_combo.setToolTip(
             "Filtrelenmiş: seçili adımın çıktısı. Normal: kalibrasyonu uygulanmış ham kare "
-            "(ölçüm varsa üzerine çizilir). İkisi Bir Arada: ikisi yan yana."
+            "(ölçüm varsa üzerine çizilir). İkisi Bir Arada: ikisi yan yana. "
+            "ROI Bağlamda: filtrelenmiş sonuç, ham karenin İÇİNDE kendi yerine yerleştirilir — "
+            "işlenen bölge ile işlenmeyen alanı aynı karede birlikte görürsünüz."
         )
         for label, mode in [
             ("Filtrelenmiş", "filtered"),
             ("Normal", "normal"),
             ("İkisi Bir Arada", "both"),
+            ("ROI Bağlamda", "in_context"),
         ]:
             self.view_mode_combo.addItem(label, mode)
         self.view_mode_combo.currentIndexChanged.connect(self._on_view_mode_changed)
@@ -1021,8 +1118,19 @@ class MainWindow(QMainWindow):
         params_layout.addWidget(self.enum_gallery)
         params_layout.addStretch(1)
 
+        # `camera_settings_panel`'in `QToolBox`'ında ve `ShapeMatchingDialog`'un kontrol
+        # panelinde olduğu GİBİ: parametre sekmesinin içeriği (operatöre göre değişen
+        # sayıda alan + seçenek önizleme galerisi) sekmeye doğrudan konulursa, kendi
+        # sizeHint'i sekme -> `central_splitter` -> ana pencere zincirine YUKARI doğru
+        # taşınıp pencereyi büyütüyor/panoları yeniden dağıtıyordu. Kaydırma alanı bu
+        # talebi ÖZÜMSER: sığmayan içerik panel İÇİNDE kaydırılır, pencere boyutu
+        # operatör seçimine göre DEĞİŞMEZ.
+        params_scroll = QScrollArea()
+        params_scroll.setWidgetResizable(True)
+        params_scroll.setWidget(params_tab)
+
         self.right_tabs = QTabWidget()
-        self.right_tabs.addTab(params_tab, "Parametreler")
+        self.right_tabs.addTab(params_scroll, "Parametreler")
         self.right_tabs.addTab(self.camera_settings_panel, "Kamera Ayarları")
         self.right_tabs.addTab(self.results_panel, "Sonuçlar")
         self.right_tabs.currentChanged.connect(self._on_right_tabs_changed)
@@ -1106,17 +1214,32 @@ class MainWindow(QMainWindow):
             self.hover_info_label.setText("\n".join(lines))
             return
 
+        # Gerçek kullanıcı isteği: "kalibrasyon varsa pixelin yanında cm veya mm de yazsın."
+        # `geom.shape_match` dalı (yukarıda) bunu zaten yapıyordu ama `analysis.region_props`
+        # dalı kalibrasyon aktifken px değerini TAMAMEN gizleyip sadece cm gösteriyordu --
+        # aynı bilgi burada da px + cm birlikte yazılıyor (overlay metni `region_props.py`'de
+        # zaten bu formatta).
         if "obb_mm_w" in measurement and "obb_mm_h" in measurement:
             lines.append(
-                f"Boyut: {measurement['obb_mm_w'] / 10:.2f} x {measurement['obb_mm_h'] / 10:.2f} cm"
+                f"Boyut: {measurement['obb_w']:.0f} x {measurement['obb_h']:.0f} px "
+                f"({measurement['obb_mm_w'] / 10:.2f} x {measurement['obb_mm_h'] / 10:.2f} cm)"
             )
         elif "obb_w" in measurement and "obb_h" in measurement:
             lines.append(f"Boyut: {measurement['obb_w']:.0f} x {measurement['obb_h']:.0f} px")
 
         if "area_mm2" in measurement:
-            lines.append(f"Alan: {measurement['area_mm2'] / 100:.2f} cm²")
+            lines.append(
+                f"Alan: {measurement['area']:.0f} px² ({measurement['area_mm2'] / 100:.2f} cm²)"
+            )
         elif "area" in measurement:
             lines.append(f"Alan: {measurement['area']:.0f} px²")
+
+        if "perimeter_mm" in measurement:
+            lines.append(
+                f"Çevre: {measurement['perimeter']:.0f} px ({measurement['perimeter_mm']:.1f} mm)"
+            )
+        elif "perimeter" in measurement:
+            lines.append(f"Çevre: {measurement['perimeter']:.0f} px")
 
         if "obb_angle" in measurement:
             lines.append(f"Açı: {measurement['obb_angle']:.1f}°")
@@ -1205,6 +1328,10 @@ class MainWindow(QMainWindow):
             self._load_calibration_profile(new_graph.calibration_profile)
             if new_graph.calibration_height_mm is not None:
                 self._set_active_height_mm(new_graph.calibration_height_mm)
+        # Reçete KENDİ kalibrasyon profilini taşımıyorsa (yukarıdaki dal çalışmadıysa) oturumda
+        # aktif olan kalibrasyon yine de korunur -- reçetedeki boş `mm_per_px` alanı onu
+        # sessizce silmesin (bkz. `_reapply_active_calibration`).
+        self._reapply_active_calibration()
         self._refresh_preview()
         get_logger().info("Reçete yüklendi: %s", path)
 
@@ -1235,6 +1362,31 @@ class MainWindow(QMainWindow):
             self._push_mm_per_px(mm_per_px, refresh=False)
         get_logger().info("Kalibrasyon profili uygulandı: %s", name)
         return True
+
+    def _reapply_active_calibration(self) -> None:
+        """Aktif kalibrasyonu (varsa) düğüm parametrelerine YENİDEN yazar.
+
+        Gerçek kullanıcı raporu: "kalibrasyon ayarı kendi kendine kaybolabiliyor". Bir önceki
+        tur `_push_mm_per_px`'in `ParamForm` önbelleğiyle senkron olmama sorununu çözmüştü;
+        geriye İKİNCİ bir kayıp yolu kalmıştı: `mm_per_px` düğümün `params`'ında YAŞADIĞI için,
+        düğüm parametrelerini TOPLUCA geri yükleyen her işlem (Geri Al/Yinele -- snapshot
+        kalibrasyondan ÖNCE alınmışsa; ve reçete yükleme -- reçete kendi kalibrasyon profilini
+        taşımıyorsa) alanı sessizce ESKİ/BOŞ değerine döndürüyordu. Oysa kalibrasyon KAYNAĞI
+        (`_active_lens_profile`/`_plane_rectification`/`_reference_distance_mm`/
+        `HeightScaleModel`) bu işlemlerden hiç etkilenmiyor -- yani veri duruyor, sadece
+        düğüme yazılmış kopyası siliniyordu.
+
+        `_compute_auto_mm_per_px()` (kareye bağımlı netlik-tabanlı yol henüz bir kare
+        görmediyse `None` dönebilir) başarısız olursa en son hesaplanan değere
+        (`_last_auto_mm_per_px`) düşülür. Hiçbir OTOMATİK kalibrasyon kaynağı yoksa hiçbir şey
+        yapılmaz -- kullanıcının ELLE girdiği bir `mm_per_px`'in geri alınması meşru bir
+        Geri Al'dır, ona dokunulmaz."""
+        mm_per_px = self._compute_auto_mm_per_px()
+        if mm_per_px is None:
+            mm_per_px = self._last_auto_mm_per_px
+        if mm_per_px is None or mm_per_px <= 0:
+            return
+        self._push_mm_per_px(mm_per_px, refresh=False)
 
     def _push_mm_per_px(self, mm_per_px: float, refresh: bool = True) -> None:
         """`refresh=False`, `_on_camera_tick` gibi zaten kendi sonunda bir kez
@@ -1439,6 +1591,35 @@ class MainWindow(QMainWindow):
 
     def closeEvent(self, event) -> None:  # noqa: N802 - Qt override
         self.stop_camera()
+        # `_param_debounce_timer` (bkz. `_on_params_changed`, 120ms) pencere kapatılırken HÂLÂ
+        # bekliyor olabilir -- bir parametre değişikliğinden hemen sonra kapatmak yeterli.
+        # Zamanlayıcı `self`'in çocuğu olsa da, ateşlenmesi ile Python nesnesinin yok edilmesi
+        # ÇAKIŞIRSA PySide bağlı slotu (bir Python bound method'u) artık çözemeyip
+        # "AttributeError: Slot 'MainWindow::' not found" üretiyordu -- test paketinde
+        # `-p no:randomly` ile HER ÇALIŞTIRMADA aynı iki testte (ikisi de kapanmadan hemen
+        # önce `params_changed` yayınlıyor) tekrar üretilebiliyordu. Açıkça durdurmak, bekleyen
+        # tek seferlik atışı tamamen ortadan kaldırır.
+        self._param_debounce_timer.stop()
+        self._splitter_restore_timer.stop()
+        # Tüm tekil dialoglar `destroyed.connect(...)` ile, `self`'i (MainWindow) yakalayan bir
+        # Python callable'ına bağlı (izleyen referansı temizlemek için). `deleteLater()` ile
+        # yok edilmeyi BEKLEYEN bir dialog varsa (ör. Ölçüm Aracı yeniden açıldığında eskisi),
+        # onun `destroyed`'ı ana pencere çoktan yok edildikten SONRA ateşlenebiliyor -- PySide
+        # o anda callable'ın alıcısını (ölü MainWindow) artık çözemeyip "AttributeError: Slot
+        # 'MainWindow::' not found" üretiyordu. Bağlantıyı burada kesmek bunu tamamen ortadan
+        # kaldırır: pencere kapanırken bu geri çağrıların (sadece kendi alanlarını `None`
+        # yapıyorlar) yapacak hiçbir anlamlı işi zaten kalmamıştır.
+        # İzlenen tekil referanslar YETMEZ: `deleteLater()` ile yok edilmeyi bekleyen ESKİ
+        # örnekler (ör. Ölçüm Aracı her açılışta yeniden kurulur) artık hiçbir alanda
+        # tutulmuyor ama `destroyed` bağlantıları hâlâ canlı. Bu yüzden `_connect_destroyed`
+        # ile kaydedilen TÜM dialoglar geziliyor.
+        for dialog in self._tracked_dialogs:
+            try:
+                dialog.destroyed.disconnect()
+            except (RuntimeError, TypeError):
+                # C++ nesnesi çoktan yok edilmiş ya da bağlantı zaten kesilmiş -- zararsız.
+                pass
+        self._tracked_dialogs.clear()
         # `_LiveTickWorker`/`_BatchWorker` (bkz. yukarıdaki sınıflar) arka planda çalışırken
         # pencere kapatılırsa (ör. testlerin `qtbot.addWidget` ile tetiklediği otomatik
         # teardown -- `_on_camera_tick` çağrılıp worker'ın bitmesi HİÇ beklenmeden pencere
@@ -1450,10 +1631,41 @@ class MainWindow(QMainWindow):
         # thread tamamen bitene kadar (bu tek seferlik/sınırlı bir hesaplama, sonsuz döngü
         # DEĞİL) engeller -- normal kullanımda bu neredeyse anlık sürer, sadece pencere
         # ağır bir hesaplama ortasında kapatılırsa fark edilir bir gecikme olur.
-        if self._live_worker is not None:
-            self._live_worker.wait()
-        if self._batch_worker is not None:
-            self._batch_worker.wait()
+        #
+        # `wait()` TEK BAŞINA yetmiyordu: worker `result_ready`/`finished`'ı emit ettikten
+        # SONRA (thread biter, `wait()` anında döner) bu sinyallerin KUYRUKLU teslimatı hâlâ
+        # ana thread'in olay kuyruğunda bekliyor olabilir. PySide bir Python callable'ına
+        # yapılan bağlantıda alıcı olarak MainWindow'u DEĞİL kendi dahili "global receiver"
+        # nesnesini kullandığından, MainWindow yok edilince Qt'nin "alıcı yok edildi, bekleyen
+        # olayları sil" mekanizması bu çağrıyı TEMİZLEMİYOR -- olay daha sonra (bambaşka bir
+        # zamanda) teslim edilip ölü pencerede slot aranıyor ve "AttributeError: Slot
+        # 'MainWindow::' not found" üretiyordu (test paketinde ~3 çalıştırmada 1 rastgele bir
+        # testin teardown'ında görülen kalıntı hata buydu). Bağlantıları `wait()`'ten ÖNCE
+        # açıkça kesmek bekleyen teslimatı da geçersiz kılar.
+        for worker in (self._live_worker, self._batch_worker):
+            if worker is None:
+                continue
+            for signal in (
+                getattr(worker, "result_ready", None),
+                getattr(worker, "failed", None),
+                getattr(worker, "progress", None),
+                getattr(worker, "finished_ok", None),
+                worker.finished,
+            ):
+                if signal is None:
+                    continue
+                try:
+                    signal.disconnect()
+                except (RuntimeError, TypeError):
+                    # Zaten bağlantısı yoksa Qt/PySide hata veriyor -- zararsız.
+                    pass
+            worker.wait()
+        self._live_worker = None
+        self._batch_worker = None
+        self._live_worker_busy = False
+        # NOT: burada `QApplication.processEvents()` ile kuyruğu boşaltmak DENENDİ ve
+        # ÖLÇÜLDÜ -- bekleyen "Slot 'MainWindow::' not found" çağrılarını azaltmadı, hatta
+        # tekrar-giriş nedeniyle biraz artırdı; bu yüzden eklenmedi.
         super().closeEvent(event)
 
     def changeEvent(self, event) -> None:  # noqa: N802 - Qt override
@@ -1491,12 +1703,28 @@ class MainWindow(QMainWindow):
         SONRA (`QTimer.singleShot(0, ...)`) tekrar uyguluyoruz -- görüntü paneli sekme
         geçişlerinden TAMAMEN bağımsız kalır, kullanıcı SADECE bölme sınırını elle
         sürükleyerek boyutları değiştirebilir."""
-        sizes = self.central_splitter.sizes()
-        # `self` BAĞLAM nesnesi olarak verilir: pencere bu 0ms'lik tur dolmadan yok edilirse
-        # (ör. testlerde pencere hemen kapatılır) Qt bekleyen çağrıyı sessizce iptal eder.
-        # Bağlamsız hâlinde lambda ölü bir pencereye ulaşıp "Slot 'MainWindow::' not found"
-        # hatası üretiyordu.
-        QTimer.singleShot(0, self, lambda: self.central_splitter.setSizes(sizes))
+        self._pending_splitter_sizes = self.central_splitter.sizes()
+        self._splitter_restore_timer.start(0)
+
+    def _connect_destroyed(self, dialog: Any, handler) -> None:
+        """Bir dialog'un `destroyed` sinyalini `self`'i (MainWindow) yakalayan bir geri
+        çağrıya bağlar VE dialog'u `_tracked_dialogs`'a kaydeder.
+
+        Kayıt şart: `destroyed`, C++ nesnesi yok edilirken ateşlenir ve alıcı MainWindow'dur.
+        Bir dialog `deleteLater()` ile yok edilmeyi beklerken (ya da GC'nin onu toplaması
+        gecikirken) ana pencere ÖNCE yok edilirse, sinyal daha sonra ÖLÜ bir pencerede slot
+        aramaya çalışıp "AttributeError: Slot 'MainWindow::' not found" üretiyor -- bu hata
+        test paketinde, onu YARATAN testten bambaşka bir testte (o an hangi olay döngüsü
+        dönüyorsa orada) rastgele patlıyordu. `closeEvent` bu listeyi gezip bağlantıları
+        kesiyor; "artık izlenmeyen" (ör. Ölçüm Aracı'nın bir önceki örneği) dialoglar da
+        böylece kapsanıyor -- SADECE tekil referanslara bakmak yetmiyordu."""
+        dialog.destroyed.connect(handler)
+        self._tracked_dialogs.append(dialog)
+
+    def _restore_splitter_sizes(self) -> None:
+        if self._pending_splitter_sizes is not None:
+            self.central_splitter.setSizes(self._pending_splitter_sizes)
+            self._pending_splitter_sizes = None
 
     # -- yardımcılar ----------------------------------------------------
 
@@ -1564,6 +1792,9 @@ class MainWindow(QMainWindow):
             self.description_label.setText("")
             self.param_form.set_params([], {})
             self.enum_gallery.clear()
+        # Snapshot kalibrasyondan ÖNCE alınmış olabilir -- düğümlerin `mm_per_px` alanı geri
+        # yüklenirken sessizce sıfırlanmasın (bkz. `_reapply_active_calibration`).
+        self._reapply_active_calibration()
         self._refresh_preview()
 
     def _update_undo_redo_actions(self) -> None:
@@ -1737,7 +1968,7 @@ class MainWindow(QMainWindow):
         dialog = LensCalibrationDialog(self._camera_frame_provider, parent=self)
         dialog.calibrated.connect(self._on_lens_calibrated)
         dialog.frame_captured.connect(self.capture_gallery_panel.refresh)
-        dialog.destroyed.connect(lambda: setattr(self, "_lens_calibration_dialog", None))
+        self._connect_destroyed(dialog, lambda: setattr(self, "_lens_calibration_dialog", None))
         self._lens_calibration_dialog = dialog
         dialog.show()
 
@@ -1807,7 +2038,7 @@ class MainWindow(QMainWindow):
         )
         dialog.model_updated.connect(self._on_height_scale_model_updated)
         dialog.frame_captured.connect(self.capture_gallery_panel.refresh)
-        dialog.destroyed.connect(lambda: setattr(self, "_height_scale_dialog", None))
+        self._connect_destroyed(dialog, lambda: setattr(self, "_height_scale_dialog", None))
         self._height_scale_dialog = dialog
         dialog.show()
 
@@ -1823,7 +2054,7 @@ class MainWindow(QMainWindow):
         dialog = ShapeMatchingDialog(parent=self)
         dialog.models_changed.connect(self._on_shape_models_changed)
         dialog.frame_captured.connect(self.capture_gallery_panel.refresh)
-        dialog.destroyed.connect(lambda: setattr(self, "_shape_matching_dialog", None))
+        self._connect_destroyed(dialog, lambda: setattr(self, "_shape_matching_dialog", None))
         self._shape_matching_dialog = dialog
         dialog.show()
 
@@ -1847,7 +2078,8 @@ class MainWindow(QMainWindow):
             return
         dialog = FlatFieldDialog(parent=self)
         dialog.references_changed.connect(self._on_flat_field_references_changed)
-        dialog.destroyed.connect(lambda: setattr(self, "_flat_field_dialog", None))
+        dialog.frame_captured.connect(self.capture_gallery_panel.refresh)
+        self._connect_destroyed(dialog, lambda: setattr(self, "_flat_field_dialog", None))
         self._flat_field_dialog = dialog
         dialog.show()
 
@@ -1883,7 +2115,7 @@ class MainWindow(QMainWindow):
             return
         dialog = OnnxModelDialog(parent=self)
         dialog.models_changed.connect(self._on_onnx_models_changed)
-        dialog.destroyed.connect(lambda: setattr(self, "_onnx_model_dialog", None))
+        self._connect_destroyed(dialog, lambda: setattr(self, "_onnx_model_dialog", None))
         self._onnx_model_dialog = dialog
         dialog.show()
 
@@ -1907,7 +2139,7 @@ class MainWindow(QMainWindow):
             self._help_dialog.activateWindow()
             return
         dialog = HelpDialog(parent=self)
-        dialog.destroyed.connect(lambda: setattr(self, "_help_dialog", None))
+        self._connect_destroyed(dialog, lambda: setattr(self, "_help_dialog", None))
         self._help_dialog = dialog
         dialog.show()
 
@@ -1923,7 +2155,7 @@ class MainWindow(QMainWindow):
             parent=self,
         )
         dialog.filters_changed.connect(self.operator_library.refresh)
-        dialog.destroyed.connect(lambda: setattr(self, "_custom_filter_dialog", None))
+        self._connect_destroyed(dialog, lambda: setattr(self, "_custom_filter_dialog", None))
         self._custom_filter_dialog = dialog
         dialog.show()
 
@@ -2017,7 +2249,7 @@ class MainWindow(QMainWindow):
             if self._measurement_tool_dialog is dialog:
                 self._measurement_tool_dialog = None
 
-        dialog.destroyed.connect(_clear_if_current)
+        self._connect_destroyed(dialog, _clear_if_current)
         self._measurement_tool_dialog = dialog
         dialog.show()
 

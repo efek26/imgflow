@@ -1,6 +1,52 @@
 import cv2
 import numpy as np
 
+from imgflow.core.auto_objects import detect_objects as _detect_objects_for_polarity_tests
+
+
+def test_auto_polarity_detects_dark_object_on_light_background():
+    """Gerçek kullanıcı raporu: "şekil bulmada otomatik nesne tespitine tıklayınca hata
+    veriyor" / "bazen arka planı ölçüyor". Kök neden sabit "parlak = nesne" varsayımıydı:
+    açık zemin üzerindeki KOYU ürünlerde arka plan "nesne" sayılıyordu."""
+    image = np.full((120, 120), 230, dtype=np.uint8)
+    cv2.circle(image, (60, 60), 30, 60, -1)  # KOYU nesne, AÇIK zemin
+
+    bright = _detect_objects_for_polarity_tests(image)  # eski/varsayılan davranış
+    auto = _detect_objects_for_polarity_tests(image, polarity="auto")
+
+    # Varsayılan: arka planı (kırpımın neredeyse tamamını) nesne sanır.
+    assert bright and max(int(o.mask.sum()) for o in bright) > 0.7 * image.size
+    # Otomatik: gerçek daireyi bulur (pi*30^2 ~ 2827 px).
+    assert auto
+    largest = max(auto, key=lambda o: int(o.mask.sum()))
+    assert 0.15 * image.size < int(largest.mask.sum()) < 0.35 * image.size
+
+
+def test_auto_polarity_keeps_bright_object_on_dark_background_unchanged():
+    """Ters yön: koyu zemin üzerinde AÇIK nesnede karar değişmemeli (sahneye özel varsayım
+    yok, ölçüt her iki yönde de aynı çerçeve kuralı)."""
+    image = np.zeros((120, 120), dtype=np.uint8)
+    cv2.circle(image, (60, 60), 30, 255, -1)
+
+    bright = _detect_objects_for_polarity_tests(image)
+    auto = _detect_objects_for_polarity_tests(image, polarity="auto")
+
+    assert len(bright) == len(auto) == 1
+    assert int(bright[0].mask.sum()) == int(auto[0].mask.sum())
+
+
+def test_max_area_filters_out_a_background_sized_component():
+    """Gerçek kullanıcı isteği: "max alan da seçelim, bazen arka planı ölçüyor"."""
+    image = np.zeros((100, 100), dtype=np.uint8)
+    image[:, :] = 255  # tüm kırpımı kaplayan "bileşen"
+    image[40:60, 40:60] = 0
+
+    unlimited = _detect_objects_for_polarity_tests(image)
+    limited = _detect_objects_for_polarity_tests(image, max_area=0.9 * image.size)
+
+    assert unlimited and max(int(o.mask.sum()) for o in unlimited) > 0.9 * image.size
+    assert all(int(o.mask.sum()) <= 0.9 * image.size for o in limited)
+
 from imgflow.core.auto_objects import detect_objects
 
 

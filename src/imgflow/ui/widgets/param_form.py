@@ -17,6 +17,7 @@ from PySide6.QtWidgets import (
     QDoubleSpinBox,
     QFileDialog,
     QFormLayout,
+    QGroupBox,
     QHBoxLayout,
     QLabel,
     QLineEdit,
@@ -40,29 +41,72 @@ class ParamForm(QWidget):
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
-        self._layout = QFormLayout(self)
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(0, 0, 0, 0)
+
+        basic_container = QWidget()
+        self._layout = QFormLayout(basic_container)
+        self._layout.setContentsMargins(0, 0, 0, 0)
+
+        # Gerçek kullanıcı raporu: "aşağıdaki özellikler çok karışık, daha basite
+        # indirgeyebilir miyiz". `ParamSpec.advanced=True` olan alanlar bu KAPALI bölüme
+        # gider; kutucuk işaretlenince açılır. Hiçbir alan kaybolmaz, `values()`/
+        # `widget_for()` ve reçete serileştirmesi DEĞİŞMEZ -- sadece sunum katlanır.
+        self._advanced_box = QGroupBox("Gelişmiş Ayarlar")
+        self._advanced_box.setCheckable(True)
+        self._advanced_box.setChecked(False)
+        self._advanced_layout = QFormLayout(self._advanced_box)
+        self._advanced_box.toggled.connect(self._on_advanced_toggled)
+        self._advanced_box.setVisible(False)
+
+        outer.addWidget(basic_container)
+        outer.addWidget(self._advanced_box)
+        # Uzun Türkçe parametre etiketleri (ör. "Bulanıklık Yarıçapı (px, sadece
+        # 'Yerel/Dinamik' modda)") sarmadıkları sürece TEK BAŞLARINA formun -- ve
+        # dolayısıyla sağ sekme panelinin, `central_splitter`'ın ve ANA PENCERENİN --
+        # minimum genişliğini yüzlerce piksel büyütüyordu (ölçüldü: `correction.flat_field`
+        # seçilince ParamForm minimum genişliği 858px, pencerenin minimum genişliği
+        # 3110px'e çıkıyor, splitter panoları yeniden dağıtılıp görüntü paneli
+        # daralıyordu -- gerçek kullanıcı raporu: "gereksiz sayfa büyümeleri" ve
+        # "başka bir sekmeye geçince zoomluyor"). `WrapLongRows` dar bir panelde alanı
+        # etiketin ALTINA taşır, `setWordWrap(True)` (aşağıda, her etikette) uzun
+        # etiketi birden çok satıra böler.
+        for form in (self._layout, self._advanced_layout):
+            form.setRowWrapPolicy(QFormLayout.RowWrapPolicy.WrapLongRows)
+            form.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.ExpandingFieldsGrow)
         self._specs: list[ParamSpec] = []
         self._values: dict[str, Any] = {}
         self._widgets: dict[str, QWidget] = {}
         self._suppress_emit = False
 
     def set_params(self, specs: list[ParamSpec], values: dict[str, Any]) -> None:
-        while self._layout.rowCount():
-            self._layout.removeRow(0)
+        for form in (self._layout, self._advanced_layout):
+            while form.rowCount():
+                form.removeRow(0)
         self._specs = list(specs)
         self._values = dict(values)
         self._widgets = {}
 
+        has_advanced = False
         for spec in self._specs:
             control, container = self._build_widget(spec)
             self._widgets[spec.name] = control
             if spec.readonly:
                 container.setEnabled(False)
             label = QLabel(spec.label or spec.name)
+            label.setWordWrap(True)
             if spec.help:
                 label.setToolTip(spec.help)
                 container.setToolTip(spec.help)
-            self._layout.addRow(label, container)
+            if spec.advanced:
+                has_advanced = True
+                self._advanced_layout.addRow(label, container)
+            else:
+                self._layout.addRow(label, container)
+        # `advanced` hiç kullanılmayan spec listelerinde (ör. `camera_settings_panel.py`'nin
+        # dinamik GenICam alanları) bölüm HİÇ görünmez -- düzen eskisiyle birebir aynı kalır.
+        self._advanced_box.setVisible(has_advanced)
+        self._apply_advanced_visibility()
 
         # Qt, bir QComboBox'a `addItems()` ile en az bir öğe eklendiğinde -- kutu henüz HİÇ
         # seçim yapılmamışken (currentIndex=-1) -- otomatik olarak İLK öğeyi seçili gösterir.
@@ -88,6 +132,20 @@ class ParamForm(QWidget):
                     corrected = True
         if corrected:
             self.params_changed.emit(dict(self._values))
+
+    def _on_advanced_toggled(self, _checked: bool) -> None:
+        self._apply_advanced_visibility()
+
+    def _apply_advanced_visibility(self) -> None:
+        """Kutucuk kapalıyken bölümün İÇERİĞİ gizlenir (başlık/kutucuk görünür kalır ki
+        kullanıcı gelişmiş alanların VAR OLDUĞUNU görebilsin). Widget'lar yok edilmez --
+        `widget_for`/`set_value` ve `values()` her durumda çalışmaya devam eder."""
+        show = self._advanced_box.isChecked()
+        for index in range(self._advanced_layout.count()):
+            item = self._advanced_layout.itemAt(index)
+            widget = item.widget() if item is not None else None
+            if widget is not None:
+                widget.setVisible(show)
 
     def values(self) -> dict[str, Any]:
         return dict(self._values)

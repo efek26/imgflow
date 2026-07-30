@@ -217,7 +217,12 @@ _DESCRIPTION_BY_OP_ID = {
         "gibi etiket) gösterir; sağdaki Sonuçlar sekmesinde model başına sayım görünür. "
         "HALCON'daki find_shape_model'e yakın, piramit tabanlı kabadan-inceye arama kullanır — "
         "ürünün bant üzerinde döndüğü/kaydığı konumlandırma, hizalama kontrolü ve parça sayımında "
-        "kullanılır."
+        "kullanılır. Aynı üründen bazıları bulunup bazıları bulunamıyorsa 'Min. Skor'u "
+        "düşürmeden ÖNCE: (1) bu adımdan önce bir 'Aydınlatma Düzeltme' (Yerel/Dinamik) adımı "
+        "ekleyin — gölgede kalan ürünlerin kenar kontrastı zayıfladığı için skor düşer; "
+        "(2) modeli 'Sadece Dış Kontur' ile yeniden eğitin; (3) 'Elenen Adayları Göster' ile "
+        "eşiğin ne kadar altında kalındığını görün. Eşiği körlemesine düşürmek düz/boş "
+        "zeminde yanlış eşleşmelere yol açar; 'İç Bölge Doğrulaması' bunları eler."
     ),
     "analysis.color_props": (
         "Tüm görüntünün (önceki bir ROI adımıyla daraltılmışsa sadece o alanın) L*a*b* "

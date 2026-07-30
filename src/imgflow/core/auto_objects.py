@@ -54,6 +54,34 @@ def _edge_based_foreground_mask(gray: np.ndarray) -> np.ndarray:
     return filled
 
 
+def _border_foreground_fraction(binary: np.ndarray) -> float:
+    """Görüntünün DIŞ ÇERÇEVESİNDEKİ piksellerin ne kadarının ön plan (255) sayıldığı."""
+    top, bottom = binary[0, :], binary[-1, :]
+    left, right = binary[:, 0], binary[:, -1]
+    border = np.concatenate([top, bottom, left, right])
+    return float((border > 0).mean()) if border.size else 0.0
+
+
+def _apply_auto_polarity(binary: np.ndarray) -> np.ndarray:
+    """"Parlak taraf = nesne" varsayımının YANLIŞ olduğu durumlarda ikili görüntüyü ters çevirir.
+
+    Gerçek kullanıcı sorunu: "şekil bulmada otomatik nesne tespitine tıklayınca hata veriyor"
+    ve "bazen arka planı ölçüyor". Kök neden, `detect_objects`'in (ve `segment.
+    connected_components`'in) sabit "parlak = nesne" varsayımıydı: kullanıcının ürünleri
+    (koyu kapaklar) AÇIK bir zemin üzerindeydi, bu yüzden Otsu ARKA PLANI ön plan sayıyor,
+    "tespit edilen nesne" tüm ROI'yi kaplıyor ve kontur filtresi ya hiçbir şey elemiyor ya da
+    (ters çevir işaretliyse) HER ŞEYİ eleyip eğitimi "yeterli kenar noktası yok" hatasıyla
+    düşürüyordu.
+
+    Ölçüt tamamen genel ve sahneden bağımsız: **arka plan, kırpımın dış çerçevesini
+    kaplar; çerçeve içine alınmış bir nesne kaplamaz.** Çerçevenin yarısından fazlası ön plan
+    işaretliyse taraf yanlış seçilmiş demektir ve ters çevrilir. Kararsız (tam yarı) durumda
+    mevcut davranış (parlak = nesne) korunur."""
+    if _border_foreground_fraction(binary) > 0.5:
+        return cv2.bitwise_not(binary)
+    return binary
+
+
 @dataclass(frozen=True)
 class DetectedObject:
     label: int
@@ -75,6 +103,7 @@ def detect_objects(
     fill_holes: bool = False,
     close_kernel_size: int = 0,
     robust: bool = False,
+    polarity: str = "bright",
 ) -> list[DetectedObject]:
     """`min_area`/`max_area`: 0 = o yönde sınır YOK (`segment.connected_components`'taki
     `max_area_ratio=0` ile AYNI "0=kapalı" kuralı). `threshold_mode="manual"` iken Otsu
@@ -87,7 +116,12 @@ def detect_objects(
     tek seferlik eğitim-zamanı kontur tespiti kullanır -- performans kısıtı yok) ek bir kenar-
     tabanlı ön-plan tahmini (bkz. `_edge_based_foreground_mask`) mevcut eşikleme sonucuyla
     BİRLEŞTİRİR -- Otsu/manuel eşiğin YEREL aydınlatma farkı/parlama yüzünden kaçırdığı sınırları
-    tamamlar."""
+    tamamlar.
+
+    `polarity`: `"bright"` (varsayılan, eski davranış -- parlak taraf nesnedir), `"dark"`
+    (koyu taraf nesnedir) ya da `"auto"` (bkz. `_apply_auto_polarity` -- kırpımın dış
+    çerçevesini kaplayan taraf ARKA PLAN sayılır). Koyu ürün/açık zemin sahnelerinde
+    varsayılan seçim arka planı "nesne" sanıyordu."""
     gray = image if image.ndim == 2 else cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
 
     if threshold_mode == "manual":
@@ -101,6 +135,14 @@ def detect_objects(
             binary = gray
         else:
             _, binary = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+
+    # Polarite kararı eşikleme sonucu üzerinde, kenar-tabanlı birleştirmeden ÖNCE verilir:
+    # `_edge_based_foreground_mask` dış konturları doldurduğu için kırpımın tamamını
+    # kaplayabilir ve çerçeve ölçütünü anlamsızlaştırır.
+    if polarity == "dark":
+        binary = cv2.bitwise_not(binary)
+    elif polarity == "auto":
+        binary = _apply_auto_polarity(binary)
 
     if robust:
         binary = cv2.bitwise_or(binary, _edge_based_foreground_mask(gray))

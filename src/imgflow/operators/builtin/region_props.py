@@ -148,6 +148,7 @@ class RegionPropsOp:
             min=0.0,
             label="Kısa Kenar Min (mm kalibrasyonluyken, yoksa px)",
             help="mm_per_px > 0 ise mm, değilse px. 0 = alt sınır kontrol edilmez.",
+            advanced=True,
         ),
         ParamSpec(
             "tol_short_max",
@@ -156,6 +157,7 @@ class RegionPropsOp:
             min=0.0,
             label="Kısa Kenar Max (mm kalibrasyonluyken, yoksa px)",
             help="mm_per_px > 0 ise mm, değilse px. 0 = üst sınır kontrol edilmez.",
+            advanced=True,
         ),
         ParamSpec(
             "tol_long_min",
@@ -164,6 +166,7 @@ class RegionPropsOp:
             min=0.0,
             label="Uzun Kenar Min (mm kalibrasyonluyken, yoksa px)",
             help="mm_per_px > 0 ise mm, değilse px. 0 = alt sınır kontrol edilmez.",
+            advanced=True,
         ),
         ParamSpec(
             "tol_long_max",
@@ -172,6 +175,7 @@ class RegionPropsOp:
             min=0.0,
             label="Uzun Kenar Max (mm kalibrasyonluyken, yoksa px)",
             help="mm_per_px > 0 ise mm, değilse px. 0 = üst sınır kontrol edilmez.",
+            advanced=True,
         ),
     ]
 

@@ -1566,6 +1566,257 @@ performansı", "test paketi kırılganlığı", "doku analizinde başka HALCON k
   test_average_angle_matches_mean_of_four_directions` yönlü bir çizgi deseninde (0°/90°
   contrast'ı GERÇEKTEN farklı) ortalamanın doğru hesaplandığını kanıtlıyor.
 
+**Devam — kullanıcı "hataları tara ve düzelt; gereksiz sayfa büyümeleri, otomatik kalibrasyon
+kayıpları, kalibrasyon varsa pixelin yanında cm/mm, her işlemde kare yakalama, işlem süreleri,
+lab otomatik ölçümde aralık" dedi (çoğu daha önce yapılmıştı; kod okunarak DOĞRULANDI, gerçek
+BOŞLUKLAR bulunup kapatıldı).**
+- **Gereksiz sayfa büyümesi — ölçülerek bulunan İKİ kök neden (önceki turdaki
+  `camera_settings_panel` düzeltmesinden BAĞIMSIZ, hâlâ duruyorlardı):** (1)
+  `ui/widgets/param_form.py`'deki parametre etiketleri (`QLabel(spec.label)`) sarmıyordu --
+  uzun Türkçe etiketler (ör. "Bulanıklık Yarıçapı (px, sadece 'Yerel/Dinamik' modda)" tek
+  başına 648px) `ParamForm`'un minimum genişliğini 858px'e, sağ sekme panelininkini 358 ->
+  880px'e, ana pencereninkini 3110px'e çıkarıyordu; operatör seçmek `central_splitter`
+  panolarını yeniden dağıtıp görüntü panelini daraltıyordu (kullanıcının "sekmeye geçince
+  zoomluyor" şikayetiyle AYNI mekanizma). Düzeltme: `setWordWrap(True)` + `QFormLayout`'a
+  `WrapLongRows`/`ExpandingFieldsGrow` + parametre sekmesinin TAMAMI bir `QScrollArea`'ya
+  sarıldı (`main_window._build_layout`). (2) `main_window.status_label` sarmasızdı -- tek bir
+  uzun hata mesajı ORTA panelin minimumunu 1010 -> 1314px'e çıkarıyordu; `camera_settings_
+  panel._status_label` ile AYNI çözüm (`setWordWrap` + yatay `QSizePolicy.Ignored`), aynısı
+  `hover_info_label`'a da uygulandı. **Ölçülen sonuç: 25 operatörün 16'sı splitter boyutunu
+  değiştiriyordu, artık 0/25.**
+- **Otomatik kalibrasyon kaybının İKİNCİ yolu** (birincisi -- `ParamForm` önbelleği -- önceki
+  turda düzeltilmişti): `mm_per_px` düğümün `params`'ında YAŞADIĞI için, düğüm parametrelerini
+  TOPLUCA geri yükleyen işlemler alanı sessizce sıfırlıyordu: **Geri Al/Yinele** (snapshot
+  kalibrasyondan ÖNCE alınmışsa) ve **reçete yükleme** (reçete kendi kalibrasyon profilini
+  taşımıyorsa). Kalibrasyon KAYNAĞI (`_plane_rectification`/`_reference_distance_mm`/lens
+  profili) bu işlemlerden hiç etkilenmiyor -- yani veri duruyordu, sadece düğüme yazılmış
+  kopyası siliniyordu. Yeni `main_window._reapply_active_calibration()`
+  (`_restore_pipeline_snapshot` ve `load_recipe_from` sonunda çağrılır) `_compute_auto_mm_per_px()`
+  -> `_last_auto_mm_per_px` sırasıyla aktif değeri geri yazar; hiçbir OTOMATİK kaynak yoksa
+  HİÇBİR ŞEY yapmaz -- kullanıcının ELLE girdiği bir `mm_per_px`'in geri alınması meşru bir
+  Geri Al'dır (`test_undo_still_reverts_a_manually_typed_mm_per_px` bunu koruyor).
+- **px + cm/mm birlikte:** `geom.shape_match` yolu önceki turda düzeltilmişti ama
+  `analysis.region_props`'un HOVER paneli (`_on_hover_measurement_changed`) kalibrasyon
+  aktifken px'i TAMAMEN gizleyip sadece cm yazıyordu -- artık "50 x 20 px (2.50 x 1.00 cm)" /
+  "1000 px² (2.50 cm²)" formatında; ayrıca hiç gösterilmeyen ÇEVRE de eklendi ("120 px (60.0 mm)").
+- **Kare yakalama boşluğu:** `flat_field_dialog.py` capture-to-gallery deseni olmayan TEK
+  diyalogdu (önceki turda "canlı kamera plumbing'i yok" diye kapsam dışı bırakılmıştı) --
+  yüklenen referans görüntüsünü kaydeden bir "Kareyi Galeriye Ekle" butonu + `frame_captured`
+  sinyali eklendi (diğer diyaloglarla AYNI desen), `capture_gallery_panel._SOURCE_LABELS`'e
+  `"flat_field": "Aydınlatma Referansı"` eklendi. Artık HER diyalogda kare yakalanabiliyor.
+- **Uzun süredir kovalanan pytest-qt "Slot 'MainWindow::' not found" flake'i KÖKÜNDEN
+  çözüldü** (önceki turlarda iki kez "kısmen düzeltildi/kapsam dışı" diye bırakılmıştı; bu
+  turda ÖLÇÜLEREK teşhis edildi). Yöntem: `-p no:randomly` ile hatanın DETERMİNİSTİK hale
+  geldiği görüldü (baseline: `tests/ui/test_main_window.py` HER çalıştırmada 1 hata), sonra
+  `destroyed.connect(...)` satırlarının tamamı geçici olarak devre dışı bırakılınca hatanın
+  kaybolmasıyla kaynak kesinleştirildi. **Kök neden:** her tekil dialog
+  `dialog.destroyed.connect(lambda: setattr(self, "_x_dialog", None))` ile, ALICISI
+  MainWindow olan bir geri çağrıya bağlıydı. `destroyed` C++ nesnesi yok edilirken ateşlenir;
+  bir dialog `deleteLater()` ile silinmeyi BEKLERKEN (Ölçüm Aracı her açılışta yeniden
+  kurulur, eskisi silinmeyi bekler) ana pencere ÖNCE yok edilirse, sinyal daha sonra ÖLÜ bir
+  pencerede slot arayıp bu hatayı üretiyordu -- ve hata onu YARATAN testte değil, o sırada
+  hangi olay döngüsü dönüyorsa ORADA patladığı için hep "rastgele bir testin teardown'ı"
+  gibi görünüyordu. **Düzeltme:** yeni `_connect_destroyed(dialog, handler)` bağlantıyı
+  kurarken dialog'u `_tracked_dialogs`'a kaydediyor, `closeEvent` de bu listedeki HEPSİNİN
+  bağlantısını kesiyor -- sadece o an izlenen tekil referanslara bakmak YETMİYORDU (silinmeyi
+  bekleyen eski örnek hiçbir alanda tutulmuyor). Aynı turda iki ek (daha küçük) kaynak da
+  kapatıldı: `closeEvent` artık `_param_debounce_timer`'ı durduruyor, ve
+  `_on_right_tabs_changed`'in `QTimer.singleShot(0, self, lambda ...)` çağrısı `self`'in
+  ÇOCUĞU olan gerçek bir `QTimer`'a (`_splitter_restore_timer`) çevrildi (bağlam-nesnesi
+  aşırı yüklemesinin bekleyen atışı PySide'da güvenilir iptal edilmiyor).
+  **Ölçüm (dürüst, SONRAKİ turda güncellendi): düzeltme uygulandığı anda
+  `tests/ui/test_main_window.py` tek başına `-p no:randomly` ile 5/5 tertemizdi (baseline 4/4
+  hatalıydı) ve tam paket 12/11 temizdi. ANCAK bir sonraki turda test sayısı artınca (~960)
+  hata ~her çalıştırmada 1 kez geri geldi — yani kesin çözüm DEĞİL, olasılığı düşüren bir
+  iyileştirme. Denenip ELENEN yollar: `closeEvent`'te `QApplication.processEvents()` ile
+  kuyruğu boşaltmak (ölçüldü: fayda YOK, hatta biraz arttı), `_live_worker` referansını
+  kalıcı tutmak (fayda YOK). Kalan kaynak `_connect_destroyed`'den GEÇMEYEN bir queued
+  bağlantı olmalı (aday: `param_form._prompt_multi_select`'in modal dialog'u, toplu işlem
+  `QProgressDialog`'unun lambda'ları). **Belirti SADECE test koşumunda: assert'ler HER ZAMAN
+  geçiyor, pytest-qt başıboş bir Qt olay-döngüsü istisnasını o sırada çalışan teste
+  yazıyor** — uygulamada kullanıcıya yansıyan bir etkisi yok. Yeniden ele alınırsa: hatayı
+  `-p no:randomly` ile deterministik hale getirip `destroyed.connect`/queued bağlantıları
+  tek tek devre dışı bırakma yöntemi (bu turda kök nedeni bulan yöntem) işe yarıyor.** `test_closing_window_disconnects_destroyed_handlers_of_all_dialogs_ever_
+  opened` düzeltme geri alınınca GERÇEKTEN başarısız olduğu (`assert None == 'NÖBETÇİ'`)
+  doğrulanarak yazıldı.
+
+**Devam — kullanıcı "şekil bulma için iyileştirmeleri araştır, yapabileceklerimizi öner
+(HALCON'u örnek al)" dedi; sunulan 4 önerinin DÖRDÜNÜ de seçti.** Mevcut kod HALCON'un
+`create_shape_model`/`find_shape_model` parametre setiyle karşılaştırıldı; bulunan dört
+boşluk `core/shape_matching.py`'ye eklendi (HEPSİ geriye dönük güvenli varsayılanlarla) ve
+`operators/builtin/shape_match.py`'de ParamSpec olarak dışa açıldı:
+- **`min_contrast` (HALCON MinContrast, varsayılan 10 gri seviye — YENİ DAVRANIŞ):**
+  `_build_target_pyramid` görüntünün HER pikselinde `arctan2(gy,gx)` hesaplıyordu; puanlama
+  sadece kenar YÖNÜNE baktığından, gradyanı neredeyse SIFIR olan düz/gürültülü bir arka plan
+  pikseli bile rastgele ama TAM BİRİM uzunlukta bir yön vektörü üretip skora ±1 katkı
+  veriyordu (yani gürültü, gerçek bir kenar kadar "güçlü" sayılıyordu). Artık eşiğin
+  altındaki piksellerin cos/sin haritası SIFIRLANIR (katkı 0; yanlış yönlü bir kenar gibi
+  CEZALANDIRILMAZ). Eşik gri seviye cinsinden verilir, `_SOBEL_GRADIENT_SCALE=4.0` ile Sobel
+  büyüklüğüne çevrilir. Yan etki (ölçüldü): gürültülü sahnelerde skorlar belirgin yükseliyor
+  — mevcut `test_find_shape_model_recovers_noisy_off_step_angle_previously_missed`'in "eski
+  sabitlerle KAÇIRILIYORDU" simülasyonu artık `min_contrast=0.0` ile çağrılmak ZORUNDA
+  (o dönemde bu özellik yoktu; açık bırakılırsa eski sabitler bile nesneyi buluyor).
+- **`ignore_polarity` (HALCON Metric='ignore_global_polarity', varsayılan KAPALI):** skor
+  haritasının mutlak değeri alınır. Kontrast tümüyle ters döndüğünde (ıslak bant, farklı ürün
+  rengi, arkadan aydınlatma) her model noktasının gradyan yönü 180° döner, skor -1'e gider ve
+  nesne MÜKEMMEL eşleştiği halde tamamen kaçırılır. HALCON'un 'ignore_local_polarity'si
+  (nokta BAŞINA mutlak değer) bilinçli KAPSAM DIŞI — tek bir `filter2D` ile hesaplanamaz.
+- **`subpixel` (HALCON SubPixel='interpolation', varsayılan AÇIK):** son iyileştirme
+  seviyesinde skor haritasının tepe noktasına x/y ekseninde ayrı ayrı 3-nokta parabolü
+  (`_parabolic_peak_offset`), ve denenen açıların en iyi skorlarına da bir parabol
+  (`_parabolic_angle_offset`) uydurulur. Maliyeti ihmal edilebilir; öteleme/konum
+  ölçümlerinin (kullanıcının cm cinsinden okuduğu değerler) doğruluğunu doğrudan artırır.
+- **`last_level` (HALCON NumLevels'ının "son seviye" bileşeni, varsayılan 0 = değişiklik
+  yok):** iyileştirme bu piramit seviyesinde DURUR; 1 vermek maliyeti ~4 kat azaltır
+  (o seviyede dörtte bir piksel var), konum hassasiyeti kabalaşır. Sonuçlar HER ZAMAN tam
+  çözünürlük koordinatlarına (`2**last_level`) ölçeklenerek döndürülür.
+- **`max_overlap` (HALCON MaxOverlap, varsayılan `None`/UI'da 1.0 = KAPALI):** yeni
+  `_nms_by_overlap`, sabit mesafe eşiği (`_NMS_DIST_FRACTION * model yarıçapı`) yerine
+  eşleşmelerin sınırlayıcı kutularının örtüşme oranını kullanır (HALCON gibi KÜÇÜK kutunun
+  alanına oranlanır, IoU DEĞİL). Bantta yan yana/temas eden aynı üründen birden fazla varsa
+  eski kural onları tek eşleşmeye indirgeyebiliyordu. `_nms`'in mevcut mekansal ızgara
+  hızlandırması AYNI desende korundu; `max_overlap` verilmezse eski davranış BİREBİR aynı.
+- **Operatör içi "Arama Bölgesi"** (`search_x/y/w/h`, genişlik VEYA yükseklik 0 = kapalı):
+  `_apply_search_region` görüntüyü SADECE arama için kırpar, bulunan konumlara bölgenin
+  sol-üst köşesini geri ekler. `roi.region` adımı eklemekten farkı: görüntünün KENDİSİ
+  kırpılmaz (overlay ve sonraki adımlar tam kareyi görür, koordinat kayması/kalibrasyon
+  yorumu değişmez), sadece arama maliyeti bölge alanıyla orantılı azalır. Bozuk/sınır dışı
+  değerlerde sessizce tüm görüntüye düşer (`parse_roi_list`'in savunmacı deseni).
+
+**Devam — kullanıcı bir ekran görüntüsü paylaşıp "5 kapaktan neden 2'sini bulamadı" diye
+sordu ve "aşağıdaki özellikler çok karışık, sadeleştirebilir miyiz" dedi. Netleştirmede
+KRİTİK bilgi geldi: "güven faktörünü düşürünce başka yerleri seçiyor" + "bunu sadece bu
+örnek için düşünme, diğer örneklerde de çalışması önemli".**
+
+**Teşhis (tahmin DEĞİL, ölçüldü — ekran görüntüsü + `~/.imgflow/shape_models/kapak.json`
+salt-okunur analiz edildi):** 5 kapağın da alanı %3 içinde ve en/boy oranı 0.78-0.82 (yani
+ölçek/perspektif sorunu DEĞİL). Model noktalarının %78'i yarıçapın %90-100'ünde, %22'si
+%75-90'ında (iç halka), %0-75 aralığında HİÇ nokta yok. Bulunamayan 2 kapakta bu iç halka
+gölgede kaybolmuş (iç güçlü-kenar oranı 0.06-0.08, bulunanlarda 0.20-0.23). Modelin ~%22'si
+karşılık bulamayınca skor ~0.85'ten ~0.66'ya düşüyor -- `min_score=0.70`'in HEMEN altına.
+Eşik düşürülünce de aynı banda düşen gürültü adayları kabul ediliyor. **Sonuç: eşik ayarı
+değil, doğru/yanlış ayrımı sorunu.**
+
+- **`ShapeModel`'e iç bölge doğrulaması (HALCON'un clutter/kontrol bölgesi mantığı):**
+  `train_shape_model` artık `interior_points`/`exterior_points` (level-0 noktalarının
+  DIŞBÜKEY ZARFININ içinden ve dışındaki halkadan örneklenmiş ~120'şer nokta) ve
+  `interior_contrast` (`(ort_iç - ort_dış)/(ort_iç + ort_dış)`, Michelson benzeri) üretiyor.
+  `find_shape_model(verify_interior=True)` her adayı kabul etmeden ÖNCE aynı oranı arama
+  görüntüsünde ölçüp İŞARET (koyu/açık) ve büyüklük (`verify_tolerance` katı) uyumu arıyor;
+  düz zeminde oran ~0 çıktığından yanlış pozitifler skordan BAĞIMSIZ olarak eleniyor.
+  **Sahneye özel varsayım YOK** -- işaret eğitimden geldiği için "koyu nesne/açık zemin" ve
+  tersi aynı şekilde çalışır (test: `test_interior_verification_works_for_bright_object_on_
+  dark_background_too`). Dışbükey zarf kullanmak şekilden bağımsızdır (daire, çok parçalı
+  yazı, dişli). **Geriye dönük:** alanlar `to_dict`/`from_dict`'te opsiyonel; eski modellerde
+  `None` gelir ve doğrulama sessizce ATLANIR (`supports_interior_verification()`).
+- **Teşhis (`diagnostics` sözlüğü):** `find_shape_model` artık eşleşme olmasa bile
+  `best_score` + reddedilen en iyi N adayı (`reason`: "skor" / "dogrulama") raporluyor.
+  Operatörde yeni `show_rejected` parametresi bunları overlay'e KIRMIZI çarpı+skor olarak
+  çizdiriyor (`render_match_overlay`'in yeni `rejected` argümanı). Eşleşme YOKKEN operatör
+  tek bir `{"no_match": True, "best_score", "min_score", ...}` ölçümü döndürüyor;
+  `measurements_summary.py` bunu "Eşleşme yok — en iyi aday skoru 0.66 (Min. Skor: 0.70)"
+  + duruma göre eyleme dönük öneri olarak gösteriyor (fark `_NEAR_MISS_GAP=0.15` altındaysa
+  aydınlatma/dış-kontur, üstündeyse model/açı aralığı önerilir).
+- **`train_shape_model(outer_contour_only=True)` + Model Öğret'te "Sadece Dış Kontur"
+  checkbox'ı:** `_keep_outer_points` her açısal kutuda (360) silüet yarıçapını bulup, KOMŞU
+  kutuların maksimumunu da hesaba katarak (`_OUTER_CONTOUR_SMOOTH_BINS=3`) yarıçapı sınırın
+  `_OUTER_CONTOUR_RADIUS_TOLERANCE=0.85` katının altındaki noktaları eler. **Komşu-maksimum
+  adımı şart:** ilk sürümde dış hattın hiç örnek düşürmediği bir kutuda SADECE iç yapıya ait
+  bir nokta varsa o nokta kendi kutusunun "sınırı" olup kendini geçerli sayıyordu (ölçüldü:
+  iç yapının %17'si modelde kalıyordu). **Belgelenen ödünleşim:** DERİN girintili şekillerde
+  (yıldız/dişli, girinti < dışın %85'i) girintideki meşru noktalar da elenir -- test
+  `test_outer_contour_only_drops_deep_notches_documented_tradeoff` bunu SABİTLİYOR, böyle
+  şekillerde seçenek kapalı bırakılmalı.
+- **`min_contrast` varsayılanı 10 -> 5:** geçen turda eklenen 10, tam da bu vakadaki gibi
+  SOLUK ama gerçek iç kenarları bastırıp durumu kötüleştirebiliyordu.
+- **Parametre sadeleştirme (genel mekanizma):** `ParamSpec.advanced: bool = False` eklendi;
+  `ParamForm` artık temel alanları eski `QFormLayout`'ta, `advanced=True` olanları KAPALI bir
+  "Gelişmiş Ayarlar" `QGroupBox`'ında gösteriyor. **Alan GİZLENMEZ, katlanır:** `values()`/
+  `widget_for()`/`set_value()` ve reçete serileştirmesi HİÇ değişmez, yani davranış değil
+  sadece sunum değişir; `advanced` hiç kullanılmayan spec listelerinde (ör.
+  `camera_settings_panel.py`'nin dinamik GenICam alanları) bölüm hiç GÖRÜNMEZ ve düzen
+  eskisiyle birebir aynı kalır. İşaretlendi: `geom.shape_match` (19 -> 6 temel alan),
+  `analysis.color_props`, `analysis.texture_props`, `analysis.region_props`,
+  `correction.flat_field`.
+- `operator_library.py`'deki `geom.shape_match` açıklamasına, "aynı üründen bazıları
+  bulunamıyorsa Min. Skor'u düşürmeden ÖNCE" sırasıyla aydınlatma düzeltme / sadece dış
+  kontur / elenen adayları göster adımlarını öneren bir not eklendi.
+
+**Devam — kullanıcı dört şey bildirdi: "ROI uygulayınca başka filtreye geçince sadece ROI alanı
+gözüküyor, ROI dışını da görmek istiyorum", "şekil bulmada otomatik nesne tespitine tıklayınca
+hata veriyor, min. nesne alanı sıfırdan başlamasın, max alan da seçelim (bazen arka planı
+ölçüyor)", "yeni eklediklerin yeterince hızlı mı, hızlandıralım — ilk öncelik sorunsuzluk,
+ikincisi hız".**
+- **Yeni "ROI Bağlamda" görünüm modu** (`main_window.py::_paste_filtered_into_frame`):
+  filtrelenmiş (ROI ile KIRPILMIŞ) sonuç, ham tam karenin İÇİNE kendi yerine yapıştırılır ve
+  işlenen bölgenin sınırı turuncu bir çerçeveyle gösterilir — işlenmiş ve işlenmemiş alan aynı
+  karede birlikte görünür. Yapıştırma konumu MEVCUT `_cumulative_roi_offset`'ten gelir; tek
+  kanallı (eşikleme) çıktı BGR'ye çevrilir; zincirde ROI yoksa (kırpma yok) `None` dönüp
+  normal "Filtrelenmiş" davranışına düşülür.
+- **"Otomatik nesne tespiti hata veriyor" — KÖK NEDEN: sabit "parlak = nesne" polarite
+  varsayımı.** `core/auto_objects.py::detect_objects` (ve `segment.connected_components`)
+  hep parlak tarafı ön plan sayıyordu; kullanıcının ürünleri (koyu kapaklar) AÇIK zemin
+  üzerinde olduğu için ARKA PLAN "nesne" seçiliyordu: maske tüm ROI'yi kaplıyor (hiçbir şey
+  elenmiyor) ve "Kontur Dışını Kullan" ile birlikte HER ŞEY elenip eğitim "yeterli kenar
+  noktası yok" hatasıyla düşüyordu. Yeni `polarity` parametresi (`"bright"` varsayılan =
+  eski davranış, `"dark"`, `"auto"`): `"auto"` kırpımın DIŞ ÇERÇEVESİNİ kaplayan tarafı arka
+  plan sayar (`_apply_auto_polarity`) — tamamen genel, sahneden bağımsız bir ölçüt, iki yönde
+  de çalışır. `shape_matching_dialog.py::_build_auto_contour_mask` artık `polarity="auto"`
+  kullanıyor (gerçek kapak fotoğrafıyla doğrulandı: maske ROI'nin %100'ü yerine %60'ı).
+- **Min./Maks. nesne alanı (ROI'nin YÜZDESİ olarak)** Model Öğret penceresine eklendi:
+  varsayılan %1 (kullanıcı isteği: "sıfırdan başlamasın" — 0'da tek piksellik gürültü de
+  nesne sayılıyordu) ve %90 (kullanıcı isteği: "max alan da seçelim" — ROI'nin neredeyse
+  tamamını kaplayan bileşen pratikte arka plandır). Yüzde seçildi ki ROI boyutu değişince
+  elle yeniden ayarlamak gerekmesin.
+- **Performans ölçümü (deterministik, cProfile çağrı sayılarıyla — duvar saati bu makinede
+  ÇOK gürültülü):** 1280x1024 gürültülü sahne, 4 nesne.
+  - `min_contrast` (geçen turda eklendi) bir MALİYET DEĞİL, **3.2x HIZLANDIRMA**: kapalıyken
+    2402 `filter2D` çağrısı / 1289ms, açıkken 386 çağrı / 400ms (gürültü gradyanları
+    elenince kaba aramada çok daha az aday üretiliyor).
+  - `subpixel`/`verify_interior`/`diagnostics`: ölçülebilir maliyet ~%0-3, ihmal edilebilir.
+  - Eğitim tarafı (`outer_contour_only`) 0.5ms -> 1.4ms, tek seferlik.
+- **Ölçüm sırasında GERÇEK bir kaçırma bug'ı bulundu ve düzeltildi (`_MIN_COARSE_LEVEL_POINTS`
+  = 100):** otomatik piramit derinliği (HALCON tarzı, `num_levels=None`) çok kaba seviyeler
+  üretebiliyor ve o seviyelerde nokta sayısı düştükçe skor dağılımı düzleşiyor — ölçüldü:
+  seviye 4'te (21 nokta) 4 gerçek nesnenin kaba skoru 0.79-0.86 iken ARKA PLAN GÜRÜLTÜSÜNÜN
+  99.9 yüzdeliği 0.77; eşik (0.32) ikisinin de altında kaldığından binlerce gürültü adayı
+  üretilip `carry_limit` budamasında gerçek eşleşmeler taşıyordu. **Sonuç: 5 seviyeli model
+  0/4, 4 seviyeli 2/4, 3 seviyeli 4/4 eşleşme buluyordu.** Yeni `coarse_search_level(model)`
+  aday üretimini nokta sayısı 100'ün altındaki seviyeleri ATLAYARAK başlatıyor; hiçbir seviye
+  yetmezse eski davranışa düşer. **Bu kontrol ARAMA tarafında olduğu için önceden eğitilmiş
+  (fazla derin) modeller — kullanıcının 5 seviyeli `kapak.json`'ı dahil — yeniden eğitilmeden
+  düzelir.** Ayrıca artık kullanılmayacak kaba seviyeler HİÇ KURULMUYOR (`find_shape_model` ve
+  `shape_match.py`'nin paylaşılan piramidi `coarse_search_level`'a göre boyutlanıyor):
+  5 seviyeli model artık 3 seviyeli modelle BİREBİR aynı işi yapıyor (386 filter2D, 2 pyrDown)
+  ve 4/4 buluyor.
+
+**Devam — kullanıcı "şekil bulmada model eğitirken dikdörtgen ROI dışındaki poligon ve çember
+ROI'nin içinde kontür bulamıyor" dedi.** Teşhis: kontur ASLINDA BULUNUYORDU (gerçek kapak
+fotoğrafıyla doğrulandı: çember/poligon modunda eğitim başarılı, maske doğru) -- sorun görsel
+geri bildirimin YOKLUĞUYDU. İki katmanda da önizleme SADECE Dikdörtgen moduna kilitliydi:
+`roi_canvas.py::paintEvent` `_paint_contour_preview`'ı yalnızca RECT dalında çağırıyordu, ve
+`shape_matching_dialog.py::_refresh_contour_preview` `currentIndex() != 0` iken erken
+dönüyordu. Kullanıcı poligon/çember çizip checkbox'ı işaretleyince hiçbir kırmızı alan
+görmediği için "kontür bulamıyor" sonucuna varıyordu.
+- `paintEvent` artık önizlemeyi ÜÇ modda da (şeklin ALTINDA) çiziyor.
+- Yeni `_contour_region_and_mask()` üç modun ROI geometrisini + `_build_auto_contour_mask` +
+  `&` kesişimi + `_finalize_mask` zincirini TEK yerde topluyor; `_refresh_contour_preview`
+  bunu kullanıyor. `test_contour_preview_mask_matches_the_mask_used_for_training` önizleme
+  maskesinin `_on_train`'in KULLANDIĞI maskeyle (`_last_train_mask`) BİREBİR aynı olduğunu
+  poligon VE çember için doğruluyor -- ikisi asla sapmaz.
+- Önizleme artık çember taşınınca/boyutlanınca (`_on_roi_circle_changed`) ve poligon
+  kapatılınca/köşesi taşınınca (`_on_polygon_changed`) da tazeleniyor (eskiden bu iki yolda
+  hiç güncellenmiyordu).
+- **Mesajlar eyleme dönük hale getirildi:** ROI nesneye ÇOK SIKI çizildiğinde kırpımda hiç
+  arka plan kalmaz, dolayısıyla elenecek bir şey de yoktur (ölçüldü: gerçek kapakta çember
+  yarıçapı 58 -> %37 elenir, 38 -> %0). Bu bir hata değil ama eski "Kontur bulunamadı" metni
+  öyle görünüyordu. Artık: elenen oran `_NEGLIGIBLE_EXCLUDED_RATIO`(=%1) altındaysa "Elenecek
+  arka plan yok — çizdiğiniz alan zaten nesneye oturuyor (tespit çalıştı...)"; hiç bileşen
+  bulunamazsa "Bu ROI'de ayrı bir nesne ayırt edilemedi — ROI'yi biraz GENİŞ çizin ya da
+  'Maks. Nesne' yüzdesini yükseltin". Normal durumda elenen yüzde de yazılıyor. Eski metni
+  ("Kontur bulunamadı") arayan 7 test yeni ifadeye göre güncellendi (davranış DEĞİŞMEDİ,
+  yalnızca metin).
+
 Bilinen sonraki adım:
 - Serbest biçimli (poligon) ROI çizimi genel `roi.region` operatöründe (`core/roi.py`)
   HÂLÂ YOK — yukarıdaki `RoiCanvas` "POLYGON" modu SADECE `ShapeMatchingDialog`'un model

@@ -164,6 +164,163 @@ def _has_point_near(model, roi_center: tuple[float, float], region: tuple[float,
     return bool(((abs_x >= x0) & (abs_x <= x1) & (abs_y >= y0) & (abs_y <= y1)).any())
 
 
+def _dark_object_scene() -> np.ndarray:
+    image = np.full((200, 200), 235, dtype=np.uint8)
+    cv2.circle(image, (100, 100), 40, 70, -1)
+    return image
+
+
+def test_contour_preview_works_in_polygon_and_circle_modes(qtbot, tmp_path):
+    """Gerçek kullanıcı raporu: "şekil bulmada model eğitirken dikdörtgen ROI dışındaki
+    poligon ve çember ROI'nin içinde kontür bulamıyor." Kontur aslında bulunuyordu ama
+    önizleme SADECE Dikdörtgen modunda hesaplanıp çiziliyordu — diğer iki modda hiçbir görsel
+    geri bildirim olmadığından tespit hiç çalışmıyor gibi görünüyordu."""
+    dialog = ShapeMatchingDialog(model_dir=tmp_path, parent=None)
+    qtbot.addWidget(dialog)
+    _load_reference_directly(dialog, _dark_object_scene())
+    dialog._auto_contour_checkbox.setChecked(True)
+
+    # 1) Dikdörtgen (eskiden ÇALIŞAN tek mod) -- referans davranış.
+    dialog._draw_mode_combo.setCurrentIndex(0)
+    dialog._on_roi_changed(50, 50, 100, 100)
+    assert dialog._canvas._contour_preview is not None
+    assert dialog._canvas._contour_preview.any()
+
+    # 2) Çember
+    dialog._draw_mode_combo.setCurrentIndex(2)
+    dialog._on_roi_circle_changed(100, 100, 48)
+    assert dialog._canvas._contour_preview is not None, "çemberde önizleme üretilmeli"
+    assert dialog._canvas._contour_preview.any()
+    assert "elenecek" in dialog._contour_preview_label.text()
+
+    # 3) Poligon (kapatılmadan önce yönlendirici not, kapatıldıktan sonra önizleme)
+    dialog._draw_mode_combo.setCurrentIndex(1)
+    dialog._canvas.set_shape("POLYGON")
+    dialog._canvas._polygon_points = [(55, 55), (145, 55), (145, 145), (55, 145)]
+    dialog._canvas._polygon_closed = False
+    dialog._on_polygon_changed(dialog._canvas.polygon_points())
+    assert dialog._canvas._contour_preview is None
+    assert "Poligonu kapatın" in dialog._contour_preview_label.text()
+
+    dialog._canvas._polygon_closed = True
+    dialog._on_polygon_changed(dialog._canvas.polygon_points())
+    assert dialog._canvas._contour_preview is not None, "poligonda önizleme üretilmeli"
+    assert dialog._canvas._contour_preview.any()
+
+
+def test_contour_preview_mask_matches_the_mask_used_for_training(qtbot, tmp_path):
+    """Önizleme ile GERÇEK eğitim maskesi asla birbirinden sapmamalı (üç modun da aynı
+    geometri/kesişim/genişletme kuralını paylaştığının kanıtı)."""
+    dialog = ShapeMatchingDialog(model_dir=tmp_path, parent=None)
+    qtbot.addWidget(dialog)
+    _load_reference_directly(dialog, _dark_object_scene())
+    dialog._auto_contour_checkbox.setChecked(True)
+
+    # Çember modu
+    dialog._draw_mode_combo.setCurrentIndex(2)
+    dialog._on_roi_circle_changed(100, 100, 48)
+    _region, preview_mask, _note = dialog._contour_region_and_mask()
+    dialog._on_train()
+    assert dialog.model is not None
+    assert np.array_equal(preview_mask, dialog._last_train_mask)
+
+    # Poligon modu
+    dialog._draw_mode_combo.setCurrentIndex(1)
+    dialog._canvas.set_shape("POLYGON")
+    dialog._canvas._polygon_points = [(55, 55), (145, 55), (145, 145), (55, 145)]
+    dialog._canvas._polygon_closed = True
+    dialog._on_polygon_changed(dialog._canvas.polygon_points())
+    _region, preview_mask, _note = dialog._contour_region_and_mask()
+    dialog._on_train()
+    assert dialog.model is not None
+    assert np.array_equal(preview_mask, dialog._last_train_mask)
+
+
+def test_auto_contour_finds_dark_object_on_light_background(qtbot, tmp_path):
+    """Gerçek kullanıcı raporu: "otomatik nesne tespitine direkt tıklayınca hata veriyor".
+    Kök neden: `detect_objects`'in sabit "parlak = nesne" varsayımı, açık zemindeki KOYU
+    ürünlerde arka planı nesne sayıyordu -- maske tüm ROI'yi kaplıyor (hiçbir şey elenmiyor),
+    'Kontur Dışını Kullan' ile birlikte ise HER ŞEY eleniyor ve eğitim "yeterli kenar noktası
+    yok" hatasıyla düşüyordu. Artık polarite otomatik seçiliyor."""
+    dialog = ShapeMatchingDialog(model_dir=tmp_path, parent=None)
+    qtbot.addWidget(dialog)
+    image = np.full((200, 200), 235, dtype=np.uint8)
+    cv2.circle(image, (100, 100), 40, 70, -1)  # KOYU nesne, AÇIK zemin
+    _load_reference_directly(dialog, image)
+
+    roi = RoiRect(50, 50, 100, 100)
+    mask, note = dialog._build_auto_contour_mask(roi, image.shape[:2])
+
+    assert mask is not None, note
+    # Maske ROI'nin TAMAMI olmamalı (arka plan), gerçek daireye yakın olmalı.
+    roi_area = roi.w * roi.h
+    assert 0.2 * roi_area < int(mask.sum()) < 0.85 * roi_area
+
+    # 'Kontur Dışını Kullan' + otomatik kontur birlikte de artık ÇÖKMEDEN eğitmeli.
+    dialog._auto_contour_checkbox.setChecked(True)
+    dialog._invert_mask_checkbox.setChecked(True)
+    dialog._on_train()
+    assert dialog.model is not None
+    assert "başarısız" not in dialog._train_status_label.text()
+
+
+def test_max_object_area_percent_excludes_a_background_sized_component(qtbot, tmp_path):
+    """Gerçek kullanıcı isteği: "max alan da seçelim, bazen arka planı ölçüyor"."""
+    dialog = ShapeMatchingDialog(model_dir=tmp_path, parent=None)
+    qtbot.addWidget(dialog)
+    image = np.full((200, 200), 235, dtype=np.uint8)
+    cv2.rectangle(image, (55, 55), (140, 140), 60, -1)  # ROI'nin ~%72'sini kaplayan büyük blob
+    cv2.rectangle(image, (143, 143), (148, 148), 60, -1)  # küçük ikinci nesne
+    _load_reference_directly(dialog, image)
+    roi = RoiRect(50, 50, 100, 100)
+    roi_area = roi.w * roi.h
+
+    dialog._max_object_area_spin.setValue(100.0)  # sınır yok
+    unlimited, _ = dialog._build_auto_contour_mask(roi, image.shape[:2])
+    dialog._max_object_area_spin.setValue(30.0)  # büyük blobu ele
+    limited, _note = dialog._build_auto_contour_mask(roi, image.shape[:2])
+
+    assert unlimited is not None and int(unlimited.sum()) > 0.5 * roi_area
+    # Üst sınır büyük bileşeni elemeli -- kalan maske belirgin şekilde küçük olmalı.
+    assert limited is None or int(limited.sum()) < 0.3 * roi_area
+
+
+def test_min_object_area_default_is_not_zero(qtbot, tmp_path):
+    """Gerçek kullanıcı isteği: "minimum nesne alanı sıfırdan başlamasın"."""
+    dialog = ShapeMatchingDialog(model_dir=tmp_path, parent=None)
+    qtbot.addWidget(dialog)
+
+    assert dialog._min_object_area_spin.value() > 0.0
+    assert dialog._max_object_area_spin.value() < 100.0
+
+
+def test_outer_contour_only_checkbox_excludes_interior_structure_from_the_model(qtbot, tmp_path):
+    """Gerçek kullanıcı sorunu: aynı üründen bazıları bulunurken bazıları bulunamıyordu --
+    modelin bir kısmı, gölgede kaybolabilen İÇ yapıdan (kapak halkası/logo) geliyordu.
+    'Sadece Dış Kontur' işaretliyken iç kenarlar modele hiç girmemeli."""
+    dialog = ShapeMatchingDialog(model_dir=tmp_path, parent=None)
+    qtbot.addWidget(dialog)
+    image = np.full((200, 200), 255, dtype=np.uint8)
+    cv2.rectangle(image, (60, 60), (140, 140), 0, -1)
+    cv2.rectangle(image, (85, 85), (115, 115), 255, -1)  # belirgin İÇ kenar
+    _load_reference_directly(dialog, image)
+
+    def _interior_fraction() -> float:
+        points = dialog.model.levels[0].points
+        radius = np.linalg.norm(points, axis=1)
+        return float((radius < 0.6 * radius.max()).mean())
+
+    dialog._on_train()
+    assert dialog.model is not None
+    assert _interior_fraction() > 0.1  # iç kare modele giriyor
+
+    dialog._outer_only_checkbox.setChecked(True)
+    dialog._on_train()
+
+    assert dialog.model is not None
+    assert _interior_fraction() < 0.02
+
+
 def test_auto_contour_checkbox_uses_detected_object_mask_and_reduces_noise_points(qtbot, tmp_path):
     """ROI içinde nesnenin (parlak üçgen) YANINDA ayrı bir gürültü kenarı (küçük parlak kare)
     olsun; 'Konturu Otomatik Algıla' işaretliyken bu gürültü modele hiç girmemeli."""
@@ -191,7 +348,7 @@ def test_auto_contour_checkbox_uses_detected_object_mask_and_reduces_noise_point
     dialog._on_train()
 
     assert dialog.model is not None
-    assert "Kontur bulunamadı" not in dialog._train_status_label.text()
+    assert "ayırt edilemedi" not in dialog._train_status_label.text()
     assert not _has_point_near(dialog.model, roi_center, noise_region)
 
 
@@ -373,7 +530,7 @@ def test_circle_draw_mode_auto_contour_shrinks_to_object_within_circle(qtbot, tm
     dialog._on_train()
 
     assert dialog.model is not None
-    assert "Kontur bulunamadı" not in dialog._train_status_label.text()
+    assert "ayırt edilemedi" not in dialog._train_status_label.text()
     assert not _has_point_near(dialog.model, roi_center, noise_region)
 
 
@@ -408,7 +565,7 @@ def test_shrink_roi_to_contour_leaves_roi_unchanged_when_no_object_found(qtbot, 
     dialog._on_shrink_roi_to_contour()
 
     assert dialog._roi == (50, 50, 100, 100)
-    assert "bulunamadı" in dialog._train_status_label.text()
+    assert "ayırt edilemedi" in dialog._train_status_label.text()
 
 
 def test_invert_mask_checkbox_trains_on_background_instead_of_detected_object(qtbot, tmp_path):
@@ -434,7 +591,7 @@ def test_invert_mask_checkbox_trains_on_background_instead_of_detected_object(qt
     dialog._on_train()
 
     assert dialog.model is not None
-    assert "Kontur bulunamadı" not in dialog._train_status_label.text()
+    assert "ayırt edilemedi" not in dialog._train_status_label.text()
     assert _has_point_near(dialog.model, roi_center, noise_region)
 
 
@@ -524,7 +681,7 @@ def test_auto_contour_preview_shows_fallback_note_when_no_object_found(qtbot, mo
     dialog._auto_contour_checkbox.setChecked(True)
 
     assert dialog._canvas._contour_preview is None
-    assert "Kontur bulunamadı" in dialog._contour_preview_label.text()
+    assert "ayırt edilemedi" in dialog._contour_preview_label.text()
 
 
 def test_auto_contour_checkbox_falls_back_to_full_roi_when_no_object_found(qtbot, monkeypatch, tmp_path):
@@ -540,7 +697,7 @@ def test_auto_contour_checkbox_falls_back_to_full_roi_when_no_object_found(qtbot
     dialog._on_train()
 
     assert dialog.model is not None
-    assert "Kontur bulunamadı" in dialog._train_status_label.text()
+    assert "ayırt edilemedi" in dialog._train_status_label.text()
 
 
 def test_polygon_mode_incomplete_contour_shows_inline_error_and_does_not_train(qtbot, tmp_path):
@@ -601,7 +758,7 @@ def test_polygon_mode_auto_contour_checkbox_reduces_noise_points(qtbot, tmp_path
     dialog._on_train()
 
     assert dialog.model is not None
-    assert "Kontur bulunamadı" not in dialog._train_status_label.text()
+    assert "ayırt edilemedi" not in dialog._train_status_label.text()
     assert not _has_point_near(dialog.model, roi_center, noise_region)
 
 
@@ -629,7 +786,7 @@ def test_auto_contour_handles_disjoint_multi_part_object_like_text(qtbot, tmp_pa
     dialog._on_train()
 
     assert dialog.model is not None
-    assert "Kontur bulunamadı" not in dialog._train_status_label.text()
+    assert "ayırt edilemedi" not in dialog._train_status_label.text()
     roi_center = (roi[0] + roi[2] / 2, roi[1] + roi[3] / 2)
     # Eğitim nokta filtresi HER üç harfin de bir kenarını içermeli, sadece birini değil.
     for x, y, w, h in letters:

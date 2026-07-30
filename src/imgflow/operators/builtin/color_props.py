@@ -192,6 +192,7 @@ class ColorPropsOp:
             "alanlı nesneler (eşiklemeden kalan küçük gürültü/kırıntılar ya da parlama/"
             "yansımadan kalan küçük parlak lekeler) yok sayılır. 0 = kapalı (varsayılan), "
             "hiçbir nesne alanına göre elenmez.",
+            advanced=True,
         ),
         ParamSpec(
             "max_object_area",
@@ -202,6 +203,7 @@ class ColorPropsOp:
             help="Sadece Otomatik Nesne Tespiti açıkken kullanılır: bu değerden BÜYÜK "
             "alanlı nesneler (ör. yanlışlıkla eşiklenmiş arka plan/bant) yok sayılır. "
             "0 = kapalı (varsayılan), hiçbir nesne alanına göre elenmez.",
+            advanced=True,
         ),
         ParamSpec(
             "threshold_mode",
@@ -215,6 +217,7 @@ class ColorPropsOp:
             "kendisini nesne sanabilir. Bu durumda 'manual' seçip aşağıdaki 'Eşik Değeri'ni "
             "canlı önizlemeye bakarak nesnenin tamamını (parlamayı değil) kapsayacak "
             "şekilde elle ayarlayın.",
+            advanced=True,
         ),
         ParamSpec(
             "threshold_value",
@@ -225,6 +228,7 @@ class ColorPropsOp:
             label="Eşik Değeri (Eşikleme Modu = manual)",
             help="Bu değerden PARLAK pikseller nesne, KOYU pikseller arka plan sayılır. "
             "Sadece Eşikleme Modu 'manual' iken kullanılır.",
+            advanced=True,
         ),
         ParamSpec(
             "fill_holes",
@@ -235,6 +239,7 @@ class ColorPropsOp:
             "dış konturunun içi TAMAMEN dolu sayılır — ışık yansımasının/parlamanın nesne "
             "içinde bıraktığı küçük eşik-altı 'delikleri' doldurup nesnenin tek parça "
             "algılanmasını sağlar (nesnenin dış sınırı hâlâ eşiği geçtiği sürece çalışır).",
+            advanced=True,
         ),
         ParamSpec(
             "close_kernel_size",
@@ -246,6 +251,7 @@ class ColorPropsOp:
             help="Sadece Otomatik Nesne Tespiti açıkken kullanılır: eşiklenmiş görüntüye "
             "bu boyutta bir morfolojik KAPAMA uygulanır — parlama/yansımanın nesne "
             "SINIRINDA bıraktığı ince kopuklukları köprüler. 0 = kapalı (varsayılan).",
+            advanced=True,
         ),
         ParamSpec(
             "manual_roi_enabled",
@@ -281,14 +287,17 @@ class ColorPropsOp:
         ParamSpec(
             "ref_l", ParamType.FLOAT, default=50.0, min=0.0, max=100.0, label="Referans L*",
             help="Referans rengin parlaklığı (0=siyah, 100=beyaz).",
+            advanced=True,
         ),
         ParamSpec(
             "ref_a", ParamType.FLOAT, default=0.0, min=-128.0, max=127.0, label="Referans a*",
             help="Referans rengin yeşil(-)/kırmızı(+) ekseni.",
+            advanced=True,
         ),
         ParamSpec(
             "ref_b", ParamType.FLOAT, default=0.0, min=-128.0, max=127.0, label="Referans b*",
             help="Referans rengin mavi(-)/sarı(+) ekseni.",
+            advanced=True,
         ),
         ParamSpec(
             "delta_e_max",
@@ -298,6 +307,7 @@ class ColorPropsOp:
             label="Maks. ΔE",
             help="Ölçülen ortalama rengin referans renkten sapması bu değeri AŞARSA NG "
             "sayılır (yalnızca Tolerans Kontrolü açıkken kullanılır).",
+            advanced=True,
         ),
     ]
 

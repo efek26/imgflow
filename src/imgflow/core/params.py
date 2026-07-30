@@ -33,6 +33,13 @@ class ParamSpec:
     değil, çalışma zamanında değişen bir kayıt kümesinden (ör. kaydedilmiş şekil modelleri)
     geliyorsa kullanılır. `ParamForm` bunu düzenlenebilir bir açılır kutu olarak gösterir;
     serbest metin girişi (kayıtlı olmayan bir isim yazmak) yine de mümkündür."""
+    advanced: bool = False
+    """`True` ise alan, `ParamForm`'da varsayılan olarak KAPALI bir "Gelişmiş Ayarlar"
+    bölümünde gösterilir (bkz. `ui/widgets/param_form.py`). Gerçek kullanıcı raporu:
+    "aşağıdaki özellikler çok karışık, daha basite indirgeyebilir miyiz" -- HALCON kökenli
+    ince ayar parametreleri eklendikçe `geom.shape_match` gibi operatörler ~19 alana
+    ulaşmıştı. Alan GİZLENMEZ, sadece varsayılan olarak katlanır: `values()`/`widget_for()`
+    /reçete serileştirmesi hiç etkilenmez, yani davranış değil yalnızca SUNUM değişir."""
     multi_select: bool = False
     """`dynamic_choices` ile birlikte kullanıldığında: tek bir seçim yerine BİRDEN FAZLA
     ismin işaretlenebildiği bir kontrol listesi popup'ı gösterilir; değer, işaretli isimlerin

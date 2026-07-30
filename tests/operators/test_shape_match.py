@@ -70,6 +70,97 @@ def test_empty_model_names_raises_value_error():
         ShapeMatchOp().run({"image": image}, {"model_names": ""})
 
 
+def test_search_region_restricts_search_but_reports_full_image_coordinates(saved_model_name):
+    """Yeni "Arama Bölgesi" parametreleri (HALCON'da aramanın bir Region ile sınırlanmasıyla
+    aynı amaç): `roi.region` adımının AKSİNE görüntü KIRPILMAZ (overlay tam kare kalır) ve
+    bulunan konumlar tam kare koordinatlarında raporlanır -- sadece arama maliyeti azalır."""
+    search = np.full((300, 300), 255, dtype=np.uint8)
+    _draw_triangle(search, (60, 60), 0.0)  # bölge DIŞINDA
+    _draw_triangle(search, (210, 210), 0.0)  # bölge İÇİNDE
+
+    params = {
+        "model_names": saved_model_name,
+        "min_score": 0.5,
+        "greediness": 0.7,
+        "search_x": 150,
+        "search_y": 150,
+        "search_w": 150,
+        "search_h": 150,
+    }
+    out = ShapeMatchOp().run({"image": search}, params)
+
+    assert len(out["measurements"]) == 1
+    match = out["measurements"][0]
+    # Ofset geri eklenmeli: kırpım koordinatı (~60,60) DEĞİL tam kare koordinatı (~210,210).
+    assert match["x"] == pytest.approx(210, abs=5)
+    assert match["y"] == pytest.approx(210, abs=5)
+    # Overlay hâlâ TAM kare boyutunda (görüntü kırpılmadı).
+    assert out["overlay"].shape[:2] == search.shape[:2]
+
+    # Bölge kapalıyken (varsayılan) DIŞARIDAKİ nesne de bulunur -- yani bölge gerçekten
+    # aramayı sınırlıyor, sadece sonuçları filtrelemiyor.
+    without_region = ShapeMatchOp().run(
+        {"image": search},
+        {"model_names": saved_model_name, "min_score": 0.5, "greediness": 0.7},
+    )
+    assert len(without_region["measurements"]) == 2
+
+
+def test_no_match_reports_diagnostic_measurement_with_best_score(saved_model_name):
+    """Gerçek kullanıcı sorunu: eşleşme bulunamayınca uygulama hiçbir geri bildirim
+    vermiyordu, bu yüzden 'Min. Skor' körlemesine düşürülüyor ve düz zeminde yanlış
+    eşleşmeler çıkıyordu. Artık en iyi adayın skoru raporlanır."""
+    search = np.full((260, 260), 255, dtype=np.uint8)
+    _draw_triangle(search, (130, 130), 0.0, scale=1.2)  # öğretilenden büyük -> skor düşük
+
+    out = ShapeMatchOp().run(
+        {"image": search},
+        {"model_names": saved_model_name, "min_score": 0.95, "auto_count": True},
+    )
+
+    assert len(out["measurements"]) == 1
+    diagnostic = out["measurements"][0]
+    assert diagnostic["no_match"] is True
+    assert 0.0 < diagnostic["best_score"] < 0.95
+    assert diagnostic["min_score"] == pytest.approx(0.95)
+
+
+def test_show_rejected_marks_sub_threshold_candidates_on_the_overlay(saved_model_name):
+    search = np.full((260, 260), 255, dtype=np.uint8)
+    _draw_triangle(search, (130, 130), 0.0, scale=1.2)
+    params = {"model_names": saved_model_name, "min_score": 0.95, "auto_count": True}
+
+    without = ShapeMatchOp().run({"image": search}, params)
+    with_marks = ShapeMatchOp().run({"image": search}, {**params, "show_rejected": True})
+
+    # Elenen adaylar KIRMIZI çizilir -- kapalıyken overlay'de hiç kırmızı olmamalı.
+    def _red_pixels(overlay):
+        b, g, r = cv2.split(overlay)
+        return int(((r.astype(int) - np.maximum(b, g).astype(int)) > 80).sum())
+
+    assert _red_pixels(without["overlay"]) == 0
+    assert _red_pixels(with_marks["overlay"]) > 0
+
+
+def test_verify_interior_removes_false_positive_but_keeps_the_real_object(saved_model_name):
+    """Eşik düşürüldüğünde ortaya çıkan, düz zemindeki yanlış eşleşmeler iç bölge
+    doğrulamasıyla elenmeli; gerçek nesne korunmalı."""
+    search = np.full((200, 400), 255, dtype=np.uint8)
+    _draw_triangle(search, (100, 100), 0.0)
+    noise = np.random.default_rng(7).normal(0, 12, search.shape)
+    search = np.clip(search.astype(np.float64) + noise, 0, 255).astype(np.uint8)
+    params = {"model_names": saved_model_name, "min_score": 0.3, "auto_count": True}
+
+    without = ShapeMatchOp().run({"image": search}, {**params, "verify_interior": False})
+    verified = ShapeMatchOp().run({"image": search}, {**params, "verify_interior": True})
+
+    real = [m for m in verified["measurements"] if not m.get("no_match")]
+    assert real, "gerçek nesne korunmalı"
+    assert any(abs(m["x"] - 100) < 12 for m in real)
+    assert all(m["x"] < 250 for m in real), "boş sağ yarıda eşleşme kalmamalı"
+    assert len(real) <= len([m for m in without["measurements"] if not m.get("no_match")])
+
+
 def test_unknown_model_name_raises_not_found(saved_model_name):
     image = np.full((200, 200), 255, dtype=np.uint8)
     with pytest.raises(shape_model_store.ShapeModelNotFoundError):

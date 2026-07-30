@@ -36,6 +36,7 @@ _SOURCE_LABELS = {
     "filtered": "Filtrelenmiş",
     "measurement": "Ölçüm",
     "shape_match": "Şekil Eşleştirme",
+    "flat_field": "Aydınlatma Referansı",
 }
 
 

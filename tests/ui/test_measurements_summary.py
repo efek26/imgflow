@@ -19,6 +19,36 @@ def test_none_measurements_shows_placeholder(qtbot):
     assert "yok" in panel.text().lower()
 
 
+def test_no_match_diagnostic_shows_best_score_and_actionable_advice(qtbot):
+    """Gerçek kullanıcı sorunu: eşleşme bulunamayınca hiçbir geri bildirim yoktu, bu yüzden
+    'Min. Skor' körlemesine düşürülüyor ve düz zeminde yanlış eşleşmeler çıkıyordu."""
+    panel = MeasurementsSummaryPanel()
+    qtbot.addWidget(panel)
+
+    panel.set_measurements(
+        [{"no_match": True, "best_score": 0.66, "min_score": 0.70,
+          "rejected_count": 3, "verification_rejected": 0}]
+    )
+
+    text = panel.text()
+    assert "Eşleşme yok" in text
+    assert "0.66" in text and "0.70" in text
+    # Eşiğe çok yakın -> eşiği düşürmek yerine aydınlatma/dış kontur önerilmeli.
+    assert "Aydınlatma Düzeltme" in text and "Sadece Dış Kontur" in text
+
+
+def test_no_match_diagnostic_reports_verification_rejections_separately(qtbot):
+    panel = MeasurementsSummaryPanel()
+    qtbot.addWidget(panel)
+
+    panel.set_measurements(
+        [{"no_match": True, "best_score": 0.80, "min_score": 0.70,
+          "rejected_count": 2, "verification_rejected": 2}]
+    )
+
+    assert "İç Bölge Doğrulaması" in panel.text()
+
+
 def test_measurements_with_model_key_lists_each_match_by_number(qtbot):
     """Kullanıcı isteği: "her şekili 1,2,3,4 diye adlandıralım, sonra 1'in x,y,alpha
     değerleri... yazsın" — panel artık model başına SAYIM değil, her eşleşmeyi numarasıyla

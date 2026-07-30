@@ -16,12 +16,14 @@ Aynı adımda BİRDEN FAZLA model (ör. hem "cıvata" hem "somun") aranabilir: h
 
 from __future__ import annotations
 
+from dataclasses import replace
 from typing import Any
 
 from imgflow.core.params import ParamSpec, ParamType
 from imgflow.core.shape_matching import (
     LabeledMatch,
     build_search_pyramid,
+    coarse_search_level,
     find_shape_model,
     render_match_overlay,
 )
@@ -32,6 +34,25 @@ from imgflow.operators import registry
 
 def _parse_model_names(raw: str) -> list[str]:
     return [name.strip() for name in raw.split(",") if name.strip()]
+
+
+def _apply_search_region(image: Any, params: dict[str, Any]) -> tuple[Any, int, int]:
+    """Arama bölgesi tanımlıysa (genişlik VE yükseklik > 0) görüntüyü SADECE arama için
+    kırpar ve `(kırpım, ofset_x, ofset_y)` döndürür; tanımlı değilse ya da geçersizse
+    `(image, 0, 0)` ile tüm görüntüye düşer (sessizce -- bozuk bir değer pipeline'ı
+    çökertmemeli, `parse_roi_list`'in aynı savunmacı deseni)."""
+    w = int(params.get("search_w", 0) or 0)
+    h = int(params.get("search_h", 0) or 0)
+    if w <= 0 or h <= 0:
+        return image, 0, 0
+    img_h, img_w = image.shape[:2]
+    x0 = max(0, min(int(params.get("search_x", 0) or 0), img_w - 1))
+    y0 = max(0, min(int(params.get("search_y", 0) or 0), img_h - 1))
+    x1 = min(img_w, x0 + w)
+    y1 = min(img_h, y0 + h)
+    if x1 <= x0 or y1 <= y0:
+        return image, 0, 0
+    return image[y0:y1, x0:x1], x0, y0
 
 
 @registry.register
@@ -68,6 +89,7 @@ class ShapeMatchOp:
             label="Açı Başlangıç",
             help="Aramanın başlayacağı açı (derece). Modelin hedefte HANGİ açı aralığında "
             "dönmüş olabileceğini kısıtlamak arama hızını da artırır.",
+            advanced=True,
         ),
         ParamSpec(
             "angle_extent",
@@ -96,6 +118,7 @@ class ShapeMatchOp:
             "aramadan önce bir ROI adımıyla görüntüyü küçültmeyi deneyin; bu ikisi genelde "
             "doğruluktan ödün vermeden çok daha büyük hız kazandırır. Varsayılan (3.0) önceki "
             "bir kullanıcı raporunda ('nesne bulunamıyor/kaçırılıyor') kasıtlı seçildi.",
+            advanced=True,
         ),
         ParamSpec(
             "min_score",
@@ -137,6 +160,7 @@ class ShapeMatchOp:
             label="Açgözlülük",
             help="Düşük değer, kaba piramit seviyesinde daha gevşek bir ön-eleme eşiği kullanarak "
             "arama hızını artırır ama yanlış negatif riskini de artırır.",
+            advanced=True,
         ),
         ParamSpec(
             "mm_per_px",
@@ -151,6 +175,7 @@ class ShapeMatchOp:
             "nesnenin genişlik/yüksekliği mm cinsinden (Ölçek Araması açıksa bulunan ölçeğe "
             "göre ayarlanır, kapalıysa öğretilen SABİT boyut), ve öğretildiği pozisyondan x/y "
             "ekseninde ne kadar ötelendiği cm cinsinden sonuçlara eklenir.",
+            advanced=True,
         ),
         ParamSpec(
             "scale_min",
@@ -167,6 +192,7 @@ class ShapeMatchOp:
             "cisimden varsa scale boyutu yazmalı' (bant yüksekliği/kamera mesafesi "
             "kalibrasyonsuz değiştiğinde ya da fiziksel olarak farklı boyutlu aynı ürün "
             "varyantlarında öğretilen boyuttan sapan nesneleri de bulabilmek için).",
+            advanced=True,
         ),
         ParamSpec(
             "scale_max",
@@ -179,6 +205,7 @@ class ShapeMatchOp:
             help="Ölçek Araması aralığının üst ucu -- `scale_min`'e bakınız. Geniş bir aralık "
             "(ör. 0.5-2.0) aramayı YAVAŞLATIR (her ek ölçek, kaba arama maliyetini aynı oranda "
             "çarpar); sadece gerektiği kadar geniş tutun.",
+            advanced=True,
         ),
         ParamSpec(
             "scale_step_coarse",
@@ -192,7 +219,146 @@ class ShapeMatchOp:
             "adımda örnekleneceği. KÜÇÜLTMEK daha hassas ama daha yavaş; BÜYÜTMEK daha hızlı "
             "ama aradaki ölçeklerdeki nesneler kaçırılabilir -- 'Kaba Arama Açı Adımı' ile AYNI "
             "hız/hassasiyet dengesi mantığı.",
+            advanced=True,
         ),
+        # -- HALCON kökenli sağlamlık/doğruluk/hız parametreleri ------------------------
+        ParamSpec(
+            "verify_interior",
+            ParamType.BOOL,
+            default=True,
+            label="İç Bölge Doğrulaması",
+            help="Skordan BAĞIMSIZ ikinci bir kabul kriteri (HALCON'un clutter/kontrol bölgesi "
+            "mantığının karşılığı): eğitimde modelin İÇİ ile çevresi arasındaki kontrast "
+            "ölçülür, aramada da aynı ölçüm yapılır ve uymayan adaylar elenir. Gerçek "
+            "kullanıcı sorunu: 'Min. Skor'u düşürünce gerçek nesneler bulunuyor AMA düz/boş "
+            "zeminde de yanlış eşleşmeler çıkıyordu — bu kriter onları (içi ve dışı aynı "
+            "parlaklıkta olduğu için) eler, böylece eşiği güvenle düşürebilirsiniz. Ölçüt "
+            "aydınlatmadan bağımsız bir ORAN olduğundan koyu/açık her iki yönde de çalışır. "
+            "Bu özellikten ÖNCE eğitilmiş modellerde etkisizdir — modeli yeniden eğitin.",
+        ),
+        ParamSpec(
+            "verify_tolerance",
+            ParamType.FLOAT,
+            default=0.35,
+            min=0.0,
+            max=1.0,
+            step=0.05,
+            label="Doğrulama Toleransı",
+            advanced=True,
+            help="Bir adayın iç/dış kontrastı, eğitimde ölçülenin en az bu KATI olmalı. "
+            "Düşürmek doğrulamayı gevşetir (gölgede kalan gerçek nesneler de geçer), "
+            "yükseltmek sıkılaştırır. 0 = sadece kontrast YÖNÜ (koyu/açık) kontrol edilir.",
+        ),
+        ParamSpec(
+            "show_rejected",
+            ParamType.BOOL,
+            default=False,
+            label="Elenen Adayları Göster (teşhis)",
+            help="Açıkken eşiğin ALTINDA kalmış ya da doğrulamadan geçememiş en iyi adaylar "
+            "görüntü üzerinde KIRMIZI çarpı + skorlarıyla işaretlenir. 'Neden bulamıyor?' "
+            "sorusunu tahminle değil görerek yanıtlamak için: gerçek nesnelerin skoru ile "
+            "yanlış adayların skoru arasında ayıran bir eşik VAR MI, hemen görürsünüz.",
+        ),
+        ParamSpec(
+            "min_contrast",
+            ParamType.FLOAT,
+            default=5.0,
+            min=0.0,
+            max=255.0,
+            step=1.0,
+            label="Min. Kontrast (gri seviye)",
+            help="HALCON'un MinContrast'ının karşılığı: gradyanı bu gri-seviye kontrastın "
+            "ALTINDA kalan görüntü pikselleri puanlamaya HİÇ katılmaz. Puanlama sadece kenar "
+            "YÖNÜNE baktığından, gradyanı neredeyse sıfır olan düz/gürültülü bir arka plan "
+            "pikseli bile rastgele ama tam güçte bir yön üretip skoru kirletiyordu. YÜKSELTMEK "
+            "gürültülü/dokulu arka planda yanlış eşleşmeleri azaltır ama ZAYIF kontrastlı "
+            "(soluk) gerçek kenarları da eleyebilir — gerçek bir vakada gölgede kalan ürünün "
+            "iç kenarları tam da bu yüzden silinip skorunu eşiğin altına düşürebiliyordu, "
+            "varsayılan bu nedenle 10 yerine 5. 0 = kapalı.",
+            advanced=True,
+        ),
+        ParamSpec(
+            "ignore_polarity",
+            ParamType.BOOL,
+            default=False,
+            label="Polariteyi Yok Say",
+            help="HALCON'un Metric='ignore_global_polarity' karşılığı. Kontrast TÜMÜYLE ters "
+            "döndüğünde (koyu bant üzerinde açık ürün <-> açık bant üzerinde koyu ürün; ıslak "
+            "bant, farklı ürün rengi, arkadan aydınlatma) nesne mükemmel eşleştiği halde skor "
+            "-1'e gidip tamamen kaçırılıyordu. Açıkken iki polarite de kabul edilir. Kapalıyken "
+            "(varsayılan) ayrım korunur -- ters kontrastlı benzer bir nesneyi AYIRT ETMEK "
+            "istiyorsanız kapalı bırakın.",
+            advanced=True,
+        ),
+        ParamSpec(
+            "subpixel",
+            ParamType.BOOL,
+            default=True,
+            label="Subpiksel Doğruluk",
+            help="HALCON'un SubPixel='interpolation' karşılığı: skor haritasının tepe noktasına "
+            "parabol uydurularak konum ve açı, arama ızgarasının adımından daha ince çözülür "
+            "(yaklaşık 0.1 px). Maliyeti ihmal edilebilir; öteleme/konum ölçümlerinin "
+            "doğruluğunu doğrudan artırır.",
+            advanced=True,
+        ),
+        ParamSpec(
+            "last_level",
+            ParamType.INT,
+            default=0,
+            min=0,
+            max=5,
+            label="Son Piramit Seviyesi (hız)",
+            help="İyileştirmenin DURACAĞI piramit seviyesi. 0 (varsayılan) = tam çözünürlüğe "
+            "kadar iyileştir (en doğru). 1 vermek iyileştirme maliyetini yaklaşık 4 kat "
+            "azaltır (o seviyede dörtte bir piksel var) ama konum/açı hassasiyeti de kabalaşır "
+            "-- 'şekil bul çok kasıyor' durumunda ilk denenecek ayar budur. Model bu kadar "
+            "seviyeye sahip değilse otomatik olarak sınırlanır.",
+            advanced=True,
+        ),
+        ParamSpec(
+            "max_overlap",
+            ParamType.FLOAT,
+            default=1.0,
+            min=0.0,
+            max=1.0,
+            step=0.05,
+            label="Maks. Örtüşme",
+            help="HALCON'un MaxOverlap karşılığı: iki eşleşmenin sınırlayıcı kutuları bu orandan "
+            "FAZLA örtüşüyorsa düşük skorlu olan elenir (oran, KÜÇÜK kutunun alanına göre). "
+            "1.0 (varsayılan) = bu kural kapalı, eski mesafe tabanlı bastırma kullanılır. "
+            "Bantta YAN YANA/temas eden aynı üründen birden fazla varsa (eski kural onları tek "
+            "eşleşmeye indirgeyebiliyordu) 0.3-0.5 civarı bir değer deneyin.",
+            advanced=True,
+        ),
+        ParamSpec(
+            "search_x",
+            ParamType.INT,
+            default=0,
+            min=0,
+            max=100000,
+            label="Arama Bölgesi X",
+            help="Aramanın SADECE görüntünün bir bölgesinde yapılmasını sağlar (HALCON'da "
+            "aramanın bir Region ile sınırlanmasıyla aynı amaç). 'Arama Bölgesi Genişlik' 0 "
+            "iken bu alanlar YOK SAYILIR ve tüm görüntü aranır. Ayrı bir 'ROI / Bölge' adımı "
+            "eklemekten farkı: görüntünün kendisi KIRPILMAZ (sonraki adımlar tam kareyi görür) "
+            "ve bulunan konumlar tam kare koordinatlarında raporlanır -- sadece arama maliyeti "
+            "bölge alanıyla orantılı azalır.",
+            advanced=True,
+        ),
+        ParamSpec("search_y", ParamType.INT, default=0, min=0, max=100000, label="Arama Bölgesi Y",
+                  help="Bkz. 'Arama Bölgesi X'.", advanced=True),
+        ParamSpec(
+            "search_w",
+            ParamType.INT,
+            default=0,
+            min=0,
+            max=100000,
+            label="Arama Bölgesi Genişlik",
+            help="0 (varsayılan) = arama bölgesi KAPALI, tüm görüntü aranır. Bkz. 'Arama Bölgesi X'.",
+            advanced=True,
+        ),
+        ParamSpec("search_h", ParamType.INT, default=0, min=0, max=100000, label="Arama Bölgesi Yükseklik",
+                  help="0 = arama bölgesi kapalı. Bkz. 'Arama Bölgesi X'.", advanced=True),
     ]
 
     def run(self, inputs: dict[str, Any], params: dict[str, Any]) -> dict[str, Any]:
@@ -207,6 +373,8 @@ class ShapeMatchOp:
         scale_min = float(params.get("scale_min", 1.0))
         scale_max = float(params.get("scale_max", 1.0))
         scale_search_enabled = scale_max > scale_min
+        min_contrast = float(params.get("min_contrast", 10.0))
+        max_overlap_param = float(params.get("max_overlap", 1.0))
         common_kwargs = dict(
             angle_start=float(params.get("angle_start", -180.0)),
             angle_extent=float(params.get("angle_extent", 360.0)),
@@ -217,7 +385,22 @@ class ShapeMatchOp:
             scale_min=scale_min,
             scale_max=scale_max,
             scale_step_coarse=float(params.get("scale_step_coarse", 0.1)),
+            min_contrast=min_contrast,
+            ignore_polarity=bool(params.get("ignore_polarity", False)),
+            subpixel=bool(params.get("subpixel", True)),
+            last_level=int(params.get("last_level", 0)),
+            # 1.0 = "örtüşme kuralı kapalı" (eski mesafe tabanlı bastırma) -- `None` geçilir.
+            max_overlap=None if max_overlap_param >= 1.0 else max_overlap_param,
+            verify_interior=bool(params.get("verify_interior", True)),
+            verify_tolerance=float(params.get("verify_tolerance", 0.35)),
         )
+        show_rejected = bool(params.get("show_rejected", False))
+
+        # Arama bölgesi: görüntü KIRPILMAZ (overlay ve sonraki pipeline adımları tam kareyi
+        # görür), sadece ARAMA bu kırpımda yapılıp bulunan konumlara bölgenin sol-üst köşesi
+        # geri eklenir. `roi.region` adımının aksine bu, koordinat kayması/kalibrasyon
+        # yorumunu değiştirmez.
+        search_image, offset_x, offset_y = _apply_search_region(image, params)
 
         # Modeller ÖNCE hep birlikte yüklenir (eski davranışla AYNI sırada, bir isim bulunamazsa
         # AYNI noktada `ShapeModelNotFoundError` fırlar) ki arama görüntüsünün gradyan piramidi
@@ -226,8 +409,17 @@ class ShapeMatchOp:
         # için aynı arama karesinin piramidini sıfırdan yeniden hesaplamak gereksizdi, bkz.
         # `core/shape_matching.py::build_search_pyramid`).
         loaded_models = [(name, shape_model_store.load_shape_model(name)) for name in model_names]
-        max_levels = max((len(model.levels) for _, model in loaded_models), default=0)
-        target_pyramid = build_search_pyramid(image, max_levels) if max_levels else None
+        # Paylaşılan piramit, modellerin GERÇEKTEN kullanacağı en derin seviyeye kadar kurulur
+        # (bkz. `coarse_search_level`) -- aday üretiminde atlanan aşırı kaba seviyeleri
+        # hesaplamak boşa işti (ölçüldü: 5 seviyeli bir modelde ~85ms).
+        last_level_param = int(params.get("last_level", 0))
+        max_levels = max(
+            (coarse_search_level(model, last_level_param) + 1 for _, model in loaded_models),
+            default=0,
+        )
+        target_pyramid = (
+            build_search_pyramid(search_image, max_levels, min_contrast) if max_levels else None
+        )
 
         measurements: list[dict[str, Any]] = []
         entries: list[LabeledMatch] = []
@@ -237,8 +429,30 @@ class ShapeMatchOp:
         # (CSV/hover panelinde) hâlâ mevcut, sadece görüntü üzerindeki/tablodaki numaralama
         # sadeleşti.
         overall_index = 0
+        # Teşhis: eşleşme bulunamadığında kullanıcıya "en iyi aday ne kadar yakındı" bilgisi
+        # verilir (bkz. `ui/widgets/measurements_summary.py`). Her model için ayrı toplanıp
+        # en iyisi raporlanır.
+        best_score: float | None = None
+        rejected_all: list[dict[str, Any]] = []
         for name, model in loaded_models:
-            matches = find_shape_model(image, model, target_pyramid=target_pyramid, **common_kwargs)
+            diagnostics: dict[str, Any] = {}
+            matches = find_shape_model(
+                search_image, model, target_pyramid=target_pyramid, diagnostics=diagnostics,
+                **common_kwargs,
+            )
+            model_best = diagnostics.get("best_score")
+            if model_best is not None and (best_score is None or model_best > best_score):
+                best_score = float(model_best)
+            for candidate in diagnostics.get("rejected", []):
+                shifted = dict(candidate)
+                shifted["x"] += offset_x
+                shifted["y"] += offset_y
+                shifted["model"] = name
+                rejected_all.append(shifted)
+            if offset_x or offset_y:
+                matches = [
+                    replace(match, x=match.x + offset_x, y=match.y + offset_y) for match in matches
+                ]
             # Öğretilen (ölçek=1.0'daki) sabit genişlik/yükseklik -- ölçek araması AÇIKSA her
             # eşleşmenin GERÇEK boyutu bunun `match.scale` ile çarpımıdır (bkz. aşağısı).
             width_px = float(model.corners[:, 0].max() - model.corners[:, 0].min())
@@ -297,5 +511,23 @@ class ShapeMatchOp:
                 measurements.append(measurement)
                 entries.append(LabeledMatch(label=label, model=model, match=match))
 
-        overlay = render_match_overlay(image, entries)
+        rejected_all.sort(key=lambda c: -c["score"])
+        overlay = render_match_overlay(image, entries, rejected_all if show_rejected else None)
+
+        if not measurements and best_score is not None:
+            # Eşleşme YOKKEN tek bir "teşhis ölçümü" döndürülür: `measurements_summary.py`
+            # bunu tanıyıp "en iyi aday skoru X (Min. Skor: Y)" satırını gösterir. Gerçek
+            # kullanıcı sorunu: uygulama hiçbir geri bildirim vermediği için eşik körlemesine
+            # düşürülüyor, bu da başka yerlerde yanlış eşleşmelere yol açıyordu.
+            measurements.append(
+                {
+                    "no_match": True,
+                    "best_score": best_score,
+                    "min_score": float(params.get("min_score", 0.7)),
+                    "rejected_count": len(rejected_all),
+                    "verification_rejected": sum(
+                        1 for c in rejected_all if c.get("reason") == "dogrulama"
+                    ),
+                }
+            )
         return {"measurements": measurements, "overlay": overlay}

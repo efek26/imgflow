@@ -11,6 +11,42 @@ def _container_for(form, name):
     return None
 
 
+def test_advanced_params_are_collapsed_by_default_but_still_addressable(qtbot):
+    """Gerçek kullanıcı raporu: "aşağıdaki özellikler çok karışık, daha basite indirgeyebilir
+    miyiz". `advanced=True` alanlar KAPALI bir bölüme gider; alan kaybolmaz -- `values()` ve
+    `widget_for()` her durumda çalışır (reçete/kaydetme davranışı DEĞİŞMEZ)."""
+    form = ParamForm()
+    qtbot.addWidget(form)
+    specs = [
+        ParamSpec("temel", ParamType.INT, default=1, min=0, max=10, label="Temel"),
+        ParamSpec("ileri", ParamType.INT, default=2, min=0, max=10, label="İleri", advanced=True),
+    ]
+
+    form.set_params(specs, {"temel": 1, "ileri": 2})
+    form.show()
+
+    assert form._advanced_box.isVisible()
+    assert not form._advanced_box.isChecked()
+    assert form.widget_for("temel").isVisible()
+    assert not form.widget_for("ileri").isVisible()  # katlanmış
+    assert form.values() == {"temel": 1, "ileri": 2}  # ama değer HER ZAMAN erişilebilir
+
+    form._advanced_box.setChecked(True)
+    assert form.widget_for("ileri").isVisible()
+
+
+def test_form_without_advanced_params_has_no_advanced_section(qtbot):
+    """`advanced` hiç kullanılmayan spec listelerinde (ör. `camera_settings_panel.py`'nin
+    dinamik GenICam alanları) düzen eskisiyle BİREBİR aynı kalmalı."""
+    form = ParamForm()
+    qtbot.addWidget(form)
+
+    form.set_params([ParamSpec("a", ParamType.INT, default=1, min=0, max=5)], {"a": 1})
+    form.show()
+
+    assert not form._advanced_box.isVisible()
+
+
 def test_int_param_reflects_default_and_emits_on_change(qtbot):
     form = ParamForm()
     qtbot.addWidget(form)

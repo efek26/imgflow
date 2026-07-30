@@ -81,6 +81,28 @@ _INVERT_MASK_HELP = (
     "değil de üzerindeki bir deliği/logoyu ya da konturun etrafındaki dokuyu öğretmek "
     "isterseniz kullanışlıdır."
 )
+_OUTER_ONLY_HELP = (
+    "Sadece Dış Kontur: modele YALNIZCA nesnenin en dıştaki kenar noktaları alınır; iç yapı "
+    "(logo, kabartma, kapak halkası, parlama izi) tamamen dışlanır. Gerçek bir vakada aynı "
+    "üründen bazıları bulunurken bazıları bulunamıyordu: modelin ~%22'si iç halkadaydı ve o "
+    "halka gölgede kalan ürünlerde görünmediği için skor eşiğin hemen altına düşüyordu. Dış "
+    "hat aydınlatmadan çok daha az etkilendiğinden bu seçenek ürünler arası tutarlılığı "
+    "artırır. UYARI: model saf silüete yaklaştığı için benzer siluetli başka şeyler de "
+    "eşleşebilir — operatördeki 'İç Bölge Doğrulaması' ile BİRLİKTE kullanın."
+)
+_NEGLIGIBLE_EXCLUDED_RATIO = 0.01
+"""Kontur önizlemesinde "elenecek arka plan pratikte yok" sayılan oran. Bunun altında kırmızı
+alan gözle görülmez; kullanıcı bunu "tespit çalışmıyor" sanmasın diye ayrı bir mesaj yazılır
+(gerçek kullanıcı raporu: "poligon ve çember ROI'nin içinde kontür bulamıyor")."""
+_DEFAULT_MIN_OBJECT_AREA_PERCENT = 1.0
+"""Otomatik kontur tespitinde bir bileşenin ROI alanının en az yüzde kaçını kaplaması
+gerektiği. Gerçek kullanıcı isteği: "minimum nesne alanı sıfırdan başlamasın" -- 0'da tek
+piksellik gürültü lekeleri de "nesne" sayılıp `_MULTI_PART_AREA_RATIO` karşılaştırmasını
+bozabiliyordu."""
+_DEFAULT_MAX_OBJECT_AREA_PERCENT = 90.0
+"""Bir bileşenin en fazla ROI alanının yüzde kaçını kaplayabileceği. ROI'nin neredeyse
+tamamını kaplayan bileşen pratikte ARKA PLANDIR (gerçek kullanıcı raporu: "bazen arka planı
+ölçüyor"); 90 bu bileşeni eler ama ROI'ye sıkıca oturan gerçek nesneleri korur."""
 _DEFAULT_ROI = (40, 40, 120, 120)
 _DEFAULT_ROI_CIRCLE = (100, 100, 60)  # cx, cy, r -- _DEFAULT_ROI'nin merkezine yakın
 _DRAW_MODE_SHAPES = ("RECT", "POLYGON", "CIRCLE")
@@ -285,6 +307,36 @@ class ShapeMatchingDialog(QDialog):
         self._invert_mask_checkbox.setToolTip(_INVERT_MASK_HELP)
         self._invert_mask_checkbox.toggled.connect(self._on_auto_contour_toggled)
 
+        self._outer_only_checkbox = QCheckBox("Sadece Dış Kontur")
+        self._outer_only_checkbox.setToolTip(_OUTER_ONLY_HELP)
+
+        # Gerçek kullanıcı isteği: "minimum nesne alanı sıfırdan başlamasın, kendi otomatik
+        # belirlesin" + "max alan da seçelim, bazen arka planı ölçüyor". Değerler ROI'nin
+        # YÜZDESİ olarak verilir -- ROI büyüklüğü değiştiğinde elle yeniden ayarlamak
+        # gerekmez.
+        self._min_object_area_spin = QDoubleSpinBox()
+        self._min_object_area_spin.setRange(0.0, 100.0)
+        self._min_object_area_spin.setSingleStep(0.5)
+        self._min_object_area_spin.setSuffix(" %")
+        self._min_object_area_spin.setValue(_DEFAULT_MIN_OBJECT_AREA_PERCENT)
+        self._min_object_area_spin.setToolTip(
+            "Otomatik kontur tespitinde bir bileşenin 'nesne' sayılması için ROI alanının en az "
+            "yüzde kaçını kaplaması gerektiği. Varsayılan 0 DEĞİL: sıfırdan başlarsa tek piksellik "
+            "gürültü lekeleri de nesne sayılır."
+        )
+        self._min_object_area_spin.valueChanged.connect(lambda _v: self._refresh_contour_preview())
+
+        self._max_object_area_spin = QDoubleSpinBox()
+        self._max_object_area_spin.setRange(1.0, 100.0)
+        self._max_object_area_spin.setSingleStep(1.0)
+        self._max_object_area_spin.setSuffix(" %")
+        self._max_object_area_spin.setValue(_DEFAULT_MAX_OBJECT_AREA_PERCENT)
+        self._max_object_area_spin.setToolTip(
+            "Bir bileşenin en fazla ROI alanının yüzde kaçını kaplayabileceği. ROI'nin neredeyse "
+            "tamamını kaplayan bileşen genelde ARKA PLANDIR; bu üst sınır onu eler. 100 = sınır yok."
+        )
+        self._max_object_area_spin.valueChanged.connect(lambda _v: self._refresh_contour_preview())
+
         self._polygon_close_button = QPushButton("Poligonu Kapat")
         self._polygon_close_button.setToolTip("En az 3 nokta çizdikten sonra konturu tamamlar.")
         self._polygon_close_button.setEnabled(False)
@@ -309,6 +361,11 @@ class ShapeMatchingDialog(QDialog):
         draw_mode_row.addWidget(self._draw_mode_combo)
         draw_mode_row.addWidget(self._auto_contour_checkbox)
         draw_mode_row.addWidget(self._invert_mask_checkbox)
+        draw_mode_row.addWidget(self._outer_only_checkbox)
+        draw_mode_row.addWidget(QLabel("Min. Nesne:"))
+        draw_mode_row.addWidget(self._min_object_area_spin)
+        draw_mode_row.addWidget(QLabel("Maks. Nesne:"))
+        draw_mode_row.addWidget(self._max_object_area_spin)
         draw_mode_row.addWidget(self._shrink_roi_button)
         draw_mode_row.addWidget(self._polygon_close_button)
         draw_mode_row.addWidget(self._polygon_reset_button)
@@ -495,6 +552,9 @@ class ShapeMatchingDialog(QDialog):
 
     def _on_roi_circle_changed(self, cx: int, cy: int, r: int) -> None:
         self._roi_circle = (cx, cy, r)
+        # Çember taşınınca/boyutlanınca kontur önizlemesi de tazelenir (RECT'teki
+        # `_on_roi_changed` ile AYNI desen) -- eskiden çemberde önizleme HİÇ güncellenmiyordu.
+        self._refresh_contour_preview()
 
     def _set_draw_mode_widgets_visible(self, shape: str) -> None:
         is_polygon = shape == "POLYGON"
@@ -521,38 +581,89 @@ class ShapeMatchingDialog(QDialog):
         self._refresh_contour_preview()
 
     def _refresh_contour_preview(self) -> None:
-        """Konturu Otomatik Algıla işaretliyken (ve Dikdörtgen modundayken) ROI içinde HANGİ
-        piksellerin elendiğini canvas üzerinde canlı olarak kırmızıyla gösterir — gerçek
-        kullanıcı raporu: "elediği arka planı göremiyorum, onu da görmek istiyorum". Checkbox
-        kapalıyken/Poligon modundayken/henüz referans yokken önizleme temizlenir."""
-        if (
-            self._reference_image is None
-            or self._draw_mode_combo.currentIndex() != 0
-            or not self._auto_contour_checkbox.isChecked()
-        ):
+        """Konturu Otomatik Algıla işaretliyken, seçili ROI'nin (Dikdörtgen, Poligon ya da
+        Çember) içinde HANGİ piksellerin modelden elendiğini canvas üzerinde canlı olarak
+        kırmızıyla gösterir — gerçek kullanıcı raporu: "elediği arka planı göremiyorum, onu da
+        görmek istiyorum".
+
+        Gerçek kullanıcı raporu (2. tur): "poligon ve çember ROI'nin içinde kontür bulamıyor."
+        Kontur aslında BULUNUYORDU (eğitim doğru çalışıyordu) ama önizleme SADECE Dikdörtgen
+        modunda hesaplanıp çiziliyordu; diğer iki modda hiçbir görsel geri bildirim olmadığı
+        için tespit hiç çalışmıyor gibi görünüyordu. Artık üç mod da `_on_train`'in
+        kullandığıyla BİREBİR AYNI maskeyi (`_contour_region_and_mask`) gösteriyor."""
+        if self._reference_image is None or not self._auto_contour_checkbox.isChecked():
             self._canvas.set_contour_preview(None)
             self._contour_preview_label.setText("")
             return
 
-        x, y, w, h = self._roi
-        roi = RoiRect(x=x, y=y, w=w, h=h)
-        gray_shape = self._reference_image.shape[:2]
-        inside_mask, note = self._build_auto_contour_mask(roi, gray_shape)
-        if inside_mask is None:
+        region, mask, note = self._contour_region_and_mask()
+        if mask is None or region is None:
             self._canvas.set_contour_preview(None)
             self._contour_preview_label.setText(note)
             return
 
-        mask = self._finalize_mask(inside_mask)
-        clamped = roi.clamp(gray_shape[1], gray_shape[0])
-        excluded = np.zeros(gray_shape, dtype=bool)
-        excluded[clamped.y : clamped.y + clamped.h, clamped.x : clamped.x + clamped.w] = True
-        excluded &= ~mask
+        excluded = region & ~mask
         self._canvas.set_contour_preview(excluded)
+        region_area = int(region.sum())
+        excluded_ratio = (int(excluded.sum()) / region_area) if region_area else 0.0
         side = "dışı" if self._invert_mask_checkbox.isChecked() else "içi"
-        self._contour_preview_label.setText(
-            f"Kırmızı alan modelden elenecek (yalnızca kontur {side} kullanılacak)."
-        )
+        if excluded_ratio < _NEGLIGIBLE_EXCLUDED_RATIO:
+            # Kırmızı alan yok diye kullanıcı "tespit çalışmıyor" sanmasın: çizim nesneye
+            # sıkıca oturduğunda elenecek arka plan GERÇEKTEN kalmaz, bu beklenen durumdur.
+            self._contour_preview_label.setText(
+                "Elenecek arka plan yok — çizdiğiniz alan zaten nesneye oturuyor "
+                "(tespit çalıştı, elenecek bir şey bulamadı)."
+            )
+        else:
+            self._contour_preview_label.setText(
+                f"Kırmızı alan modelden elenecek (%{excluded_ratio * 100:.0f}) — "
+                f"yalnızca kontur {side} kullanılacak."
+            )
+
+    def _contour_region_and_mask(
+        self,
+    ) -> tuple[np.ndarray | None, np.ndarray | None, str]:
+        """`(çizilen ROI bölgesi, eğitimde kullanılacak maske, not)` üçlüsü.
+
+        `_on_train`'in üç dalıyla AYNI mantığı paylaşır (aynı ROI geometrisi, aynı
+        `_build_auto_contour_mask` + `&` kesişimi, aynı `_finalize_mask`) — böylece canlı
+        önizleme ile gerçek eğitim asla birbirinden sapmaz. Poligon kapatılmamışsa ya da
+        nesne bulunamazsa maske `None` döner."""
+        gray_shape = self._reference_image.shape[:2]
+        index = self._draw_mode_combo.currentIndex()
+
+        if index == 1:  # POLYGON
+            points = self._canvas.polygon_points()
+            if not self._canvas.is_polygon_closed() or len(points) < 3:
+                return None, None, "Poligonu kapatın (en az 3 nokta) — sonra kontur gösterilir."
+            xs = [p[0] for p in points]
+            ys = [p[1] for p in points]
+            x0, y0 = min(xs), min(ys)
+            roi = RoiRect(x=x0, y=y0, w=max(1, max(xs) - x0), h=max(1, max(ys) - y0))
+            region_canvas = np.zeros(gray_shape, dtype=np.uint8)
+            cv2.fillPoly(region_canvas, [np.array(points, dtype=np.int32).reshape(-1, 1, 2)], 255)
+            region = region_canvas.astype(bool)
+        elif index == 2:  # CIRCLE
+            cx, cy, r = self._roi_circle
+            roi = RoiRect(x=cx - r, y=cy - r, w=2 * r, h=2 * r)
+            region_canvas = np.zeros(gray_shape, dtype=np.uint8)
+            cv2.circle(region_canvas, (cx, cy), r, 255, thickness=-1)
+            region = region_canvas.astype(bool)
+        else:  # RECT
+            x, y, w, h = self._roi
+            roi = RoiRect(x=x, y=y, w=w, h=h)
+            clamped = roi.clamp(gray_shape[1], gray_shape[0])
+            region = np.zeros(gray_shape, dtype=bool)
+            region[clamped.y : clamped.y + clamped.h, clamped.x : clamped.x + clamped.w] = True
+
+        roi = roi.clamp(gray_shape[1], gray_shape[0])
+        inside_mask, note = self._build_auto_contour_mask(roi, gray_shape)
+        if inside_mask is None:
+            return region, None, note
+        # RECT'te maske doğrudan tespit sonucudur; Poligon/Çember'de çizilen şeklin İÇİYLE
+        # kesiştirilir (şeklin dışına asla taşmaz) -- `_on_train` ile AYNI kural.
+        base_mask = inside_mask if index == 0 else (region & inside_mask)
+        return region, self._finalize_mask(base_mask), note
 
     def _on_polygon_changed(self, points: list) -> None:
         count = len(points)
@@ -561,6 +672,9 @@ class ShapeMatchingDialog(QDialog):
         else:
             self._polygon_status_label.setText(f"{count} nokta çizildi (kapatmak için en az 3 gerekli).")
         self._polygon_close_button.setEnabled(not self._canvas.is_polygon_closed() and count >= 3)
+        # Poligon kapatılınca/köşesi taşınınca kontur önizlemesi tazelenir (çizim sürerken
+        # `_contour_region_and_mask` "poligonu kapatın" notunu döndürür, boşa iş yapılmaz).
+        self._refresh_contour_preview()
 
     def _on_polygon_reset(self) -> None:
         self._canvas.clear_polygon()
@@ -730,9 +844,31 @@ class ShapeMatchingDialog(QDialog):
         genişletilmiştir — konturun İÇİ `True`'dur."""
         clamped = roi.clamp(gray_shape[1], gray_shape[0])
         crop = self._reference_image[clamped.y : clamped.y + clamped.h, clamped.x : clamped.x + clamped.w]
-        objects = detect_objects(crop, robust=True)
+        # Alan sınırları ROI'nin YÜZDESİ olarak verilir: mutlak piksel değeri ROI büyüklüğüne
+        # göre her seferinde elle ayarlanmak zorunda kalırdı. Üst sınır ayrıca "tüm ROI'yi
+        # kaplayan arka plan bileşeni"ni doğrudan eler (gerçek kullanıcı raporu: "bazen arka
+        # planı ölçüyor").
+        crop_area = float(crop.shape[0] * crop.shape[1])
+        min_area = crop_area * self._min_object_area_spin.value() / 100.0
+        max_area = crop_area * self._max_object_area_spin.value() / 100.0
+        objects = detect_objects(
+            crop,
+            min_area=min_area,
+            max_area=max_area if self._max_object_area_spin.value() < 100 else 0.0,
+            robust=True,
+            polarity="auto",
+        )
         if not objects:
-            return None, "Kontur bulunamadı, tüm ROI kullanıldı."
+            # Gerçek kullanıcı raporu: "poligon ve çember ROI'nin içinde kontür bulamıyor."
+            # En sık nedeni bir HATA değil, ROI'nin nesneye ÇOK SIKI oturması: kırpımın içinde
+            # arka plan kalmadığında ayırt edilecek bir "nesne/zemin" ayrımı da kalmaz (ve
+            # tüm kırpımı kaplayan tek bileşen 'Maks. Nesne' sınırına takılır). Mesaj bu yüzden
+            # ne yapılacağını söyler; eğitim zaten tüm ROI ile GÜVENLE devam eder.
+            return None, (
+                "Bu ROI'de ayrı bir nesne ayırt edilemedi — tüm ROI kullanılacak. "
+                "ROI'yi nesnenin çevresinde biraz GENİŞ çizin (kırpımda bir miktar zemin "
+                "görünmeli) ya da 'Maks. Nesne' yüzdesini yükseltin."
+            )
         largest_area = max(int(o.mask.sum()) for o in objects)
         significant = [o for o in objects if int(o.mask.sum()) >= largest_area * _MULTI_PART_AREA_RATIO]
         mask = np.zeros(gray_shape, dtype=bool)
@@ -875,6 +1011,7 @@ class ShapeMatchingDialog(QDialog):
                 num_levels=num_levels,
                 min_gradient_fraction=self._min_gradient_spin.value(),
                 mask=mask,
+                outer_contour_only=self._outer_only_checkbox.isChecked(),
             )
         except ShapeMatchingError as exc:
             self._train_status_label.setText(f"Eğitim başarısız: {exc}")
