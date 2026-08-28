@@ -264,8 +264,14 @@ class HsvOp:
             h, s, v = cv2.split(hsv)
             v = cv2.equalizeHist(v)
             hsv = cv2.merge([h, s, v])
-
-        corrected_bgr = cv2.cvtColor(hsv, cv2.COLOR_HSV2BGR)
+            corrected_bgr = cv2.cvtColor(hsv, cv2.COLOR_HSV2BGR)
+        else:
+            # Gölge giderme kapalıyken HSV'ye gidip GERİ dönmek (BGR->HSV->BGR) hem tam bir
+            # kare dönüşümü kadar zaman harcar (1920x1080'de ölçüldü) hem de yuvarlama
+            # nedeniyle görüntüyü hafifçe BOZAR -- ör. düz bir arka plan {40} yerine {39,40}
+            # gibi iki değere dağılır ve aşağı akıştaki `segment.connected_components`
+            # gereksiz yere ek bileşenler görür. Girdinin kendisi zaten doğru sonuçtur.
+            corrected_bgr = image
 
         if params.get("apply_mask", False):
             lower = np.array(

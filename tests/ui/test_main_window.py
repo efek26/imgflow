@@ -9,7 +9,7 @@ from imgflow.core.errors import ImgflowError
 from imgflow.core.params import ParamType
 from imgflow.io_utils import flatfield_store
 from imgflow.ui import main_window as main_window_module
-from imgflow.ui.main_window import MainWindow
+from imgflow.ui.main_window import MainWindow, _build_preview_frame
 from tests.support.fake_genicam import FakeGenicamNode, FakeNodeMap, default_camera_nodes
 
 
@@ -3130,3 +3130,94 @@ def test_switching_right_tabs_reasserts_splitter_sizes(qtbot):
 
     assert calls
     assert calls[-1] == current_sizes
+
+
+def test_region_props_preview_is_drawn_on_the_upstream_color_image_not_a_binary_silhouette(
+    qtbot, tmp_path
+):
+    """Gerçek kullanıcı raporu: "hsv ile bölge ölçümünde siyah beyaz yapıyor."
+
+    `analysis.region_props` overlay'ini ZORUNLU olarak ikili (siyah/beyaz) bir siluet üzerine
+    çizer -- `LinearPipeline`'ın tek-girdi zincirinde ona sadece `labels` haritası ulaşır,
+    kaynak görüntüye erişimi YOKTUR (bkz. CLAUDE.md). Bu yüzden renkli bir HSV maskesinin
+    ardından Bölge Ölçümü adımı seçilince önizleme birden siyah/beyaza dönüyordu. Önizleme
+    tabanı artık zincirdeki en yakın GERÇEK görüntüye taşınıyor; segmentasyonun kendisini
+    görmek isteyen kullanıcı bir önceki adımı (Bağlı Bileşenler) seçebilir."""
+    img = np.zeros((40, 40, 3), dtype=np.uint8)
+    img[10:30, 10:30] = (40, 200, 60)  # belirgin YEŞİL nesne
+    path = tmp_path / "green.png"
+    cv2.imwrite(str(path), img)
+
+    window = MainWindow()
+    qtbot.addWidget(window)
+    src_id = window.add_operator("io.image_source")
+    window.add_operator("color.hsv")
+    window.add_operator("segment.connected_components")
+    props_id = window.add_operator("analysis.region_props")
+
+    window._on_step_selected(src_id)
+    window.param_form.params_changed.emit({"path": str(path)})
+    window._on_step_selected(props_id)
+
+    shown = _build_preview_frame(
+        engine=window.engine,
+        registry=window.registry,
+        graph=window.graph,
+        pipeline_order=window.pipeline.order,
+        node_id=props_id,
+        view_mode="filtered",
+        camera_active=False,
+        last_camera_frame=None,
+    ).display_image
+    assert shown is not None and shown.ndim == 3
+    # Nesnenin ortasındaki piksel hâlâ YEŞİL (gri/ikili bir siluette üç kanal EŞİT olurdu).
+    b, g, r = (int(v) for v in shown[20, 20])
+    assert g > b + 40 and g > r + 40
+
+
+def test_in_context_view_pastes_only_the_circle_not_its_black_bounding_box(qtbot, tmp_path):
+    """Gerçek kullanıcı raporu: "circle roi aldıktan sonra hsv ayarı yaptım, roi bağlamda
+    olacak şekilde -- circle'ın etrafında bir kutu oluşturdu ve içini siyah yaptı."
+
+    `roi.region`'ın daire modu çıktıyı dairenin KARE kutusuna kırpıp köşeleri siyaha boyar;
+    "ROI Bağlamda" bu kareyi olduğu gibi yapıştırdığında o siyah köşeler ham karenin gerçek
+    içeriğini siliyordu. Artık sadece daire İÇİ yapıştırılır."""
+    img = np.zeros((80, 80, 3), dtype=np.uint8)
+    img[:] = (30, 90, 200)  # düz, siyah OLMAYAN arka plan
+    img[30:50, 30:50] = (40, 200, 60)  # dairenin ortasında ayırt edilebilir bir nesne
+    path = tmp_path / "circle_scene.png"
+    cv2.imwrite(str(path), img)
+
+    window = MainWindow()
+    qtbot.addWidget(window)
+    src_id = window.add_operator("io.image_source")
+    roi_id = window.add_operator("roi.region")
+    hsv_id = window.add_operator("color.hsv")
+
+    window._on_step_selected(src_id)
+    window.param_form.params_changed.emit({"path": str(path)})
+    window._on_step_selected(roi_id)
+    window.param_form.params_changed.emit(
+        {"enabled": True, "shape": "CIRCLE", "x": 0, "y": 0, "w": 100, "h": 100,
+         "cx": 40, "cy": 40, "r": 20}
+    )
+
+    shown = _build_preview_frame(
+        engine=window.engine,
+        registry=window.registry,
+        graph=window.graph,
+        pipeline_order=window.pipeline.order,
+        node_id=hsv_id,
+        view_mode="in_context",
+        camera_active=False,
+        last_camera_frame=None,
+    ).display_image
+
+    assert shown is not None and shown.shape[:2] == img.shape[:2]
+    # Sınırlayıcı kutunun köşesi (daire DIŞI) -- ham arka plan KORUNMALI. (21,21) düzeltme
+    # olmadan turuncu DİKDÖRTGEN çerçevesine, (24,24) ise `roi.region`'ın siyaha boyadığı
+    # köşeye denk geliyordu; ikisi de kullanıcının bildirdiği iki belirtiyi sabitliyor.
+    assert tuple(int(v) for v in shown[21, 21]) == (30, 90, 200)
+    assert tuple(int(v) for v in shown[24, 24]) == (30, 90, 200)
+    # Dairenin merkezi -- işlenmiş içerik yapıştırılmış olmalı.
+    assert tuple(int(v) for v in shown[40, 40]) == (40, 200, 60)

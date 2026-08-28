@@ -1,3 +1,4 @@
+import cv2
 import numpy as np
 import pytest
 
@@ -267,3 +268,74 @@ def test_manual_roi_empty_list_yields_no_measurements():
     )
     assert out["measurements"] == []
     assert out["overlay"].shape == image.shape
+
+
+def _two_circles_with_noise_specks():
+    """İki gerçek nesne + onlardan ÖNCE (raster sırasında) gelen küçük gürültü lekeleri.
+    Bağlı bileşen etiketleri raster sırasına göre verildiğinden gürültü 1..7'yi, gerçek
+    nesneler 8-9'u alır -- yani alan filtresinden sonra HAM etiketler artık 1'den
+    başlamaz."""
+    img = np.zeros((200, 200, 3), dtype=np.uint8)
+    for x in range(10, 60, 8):
+        img[5:7, x : x + 2] = (200, 200, 200)
+    cv2.circle(img, (60, 120), 30, (40, 200, 60), -1)
+    cv2.circle(img, (150, 120), 30, (60, 60, 220), -1)
+    return img
+
+
+def test_per_object_labels_are_sequential_not_raw_component_ids():
+    """Gerçek kullanıcı raporu: "şekiller 1,2 diye numaralandırılıyor fakat sonuçlarda 6,40
+    yazıyor." Overlay sıralı sayaçla (#1, #2...) numaralandırırken ölçüm satırı bağlı bileşen
+    analizinin HAM etiket numarasını taşıyordu (alan filtresinden geçen nesneler orijinal
+    numaralarını korur, aralarında boşluk kalır) -- panel ile görüntü birbirini tutmuyordu."""
+    out = ColorPropsOp().run({"image": _two_circles_with_noise_specks()}, {"per_object_enabled": True})
+
+    assert [m["label"] for m in out["measurements"]] == [1, 2]
+
+
+def test_per_object_min_area_default_drops_noise_specks():
+    """Gerçek kullanıcı isteği: "otomatik nesne tespitinde min alan 0 px'den başlıyor, onun
+    başlangıç eşiğini arttır." 0'da tek/birkaç piksellik eşikleme gürültüsü de ayrı bir
+    'nesne' olarak ölçülüp sonuç listesini dolduruyordu."""
+    img = _two_circles_with_noise_specks()
+
+    default = ColorPropsOp().run({"image": img}, {"per_object_enabled": True})
+    disabled = ColorPropsOp().run({"image": img}, {"per_object_enabled": True, "min_object_area": 0.0})
+
+    assert len(default["measurements"]) == 2  # sadece iki gerçek daire
+    assert len(disabled["measurements"]) > 2  # gürültü lekeleri de "nesne" sayılırdı
+
+
+def test_per_object_outline_follows_the_contour_not_the_bounding_box():
+    """Gerçek kullanıcı isteği: "numaralandırdığımız kutuyu cismin hemen etrafına kontür gibi
+    çizebiliriz." Dairenin sınırlayıcı KUTUSUNUN köşesi daire dışındadır: dikdörtgen çizilseydi
+    orada overlay rengi olurdu, kontur çizilince olmaz."""
+    out = ColorPropsOp().run({"image": _two_circles_with_noise_specks()}, {"per_object_enabled": True})
+    overlay = out["overlay"]
+    m = out["measurements"][0]
+    x, y, w, h = m["bbox_x"], m["bbox_y"], m["bbox_w"], m["bbox_h"]
+    neutral = (0, 255, 255)
+
+    # Kutunun sol-üst köşesi (daire DIŞI) -- artık çizilmiyor.
+    assert tuple(int(v) for v in overlay[y + 2, x + 2]) != neutral
+    # Dairenin tepe noktası (gerçek dış hat) -- çiziliyor.
+    top_row = overlay[y : y + 3, x : x + w]
+    assert (top_row == neutral).all(axis=2).any()
+
+
+def test_per_object_labels_are_drawn_inside_the_box_not_above_or_below_it():
+    """Gerçek kullanıcı raporu: "şekli çizerken ROI'nin dışına çıkıyor, çıkmasın." Numara
+    kutunun ÜSTÜNE (y-5), değerler ALTINA (y+h+satır) yazılıyordu -- yani nesnenin/ROI'nin
+    dışına taşıp komşu bölgenin üzerine biniyordu."""
+    out = ColorPropsOp().run({"image": _two_circles_with_noise_specks()}, {"per_object_enabled": True})
+    overlay = out["overlay"]
+    m = out["measurements"][0]
+    y, h = m["bbox_y"], m["bbox_h"]
+    neutral = (0, 255, 255)
+
+    # Kutunun ÜSTÜNDE (kontur kalınlığının 1 piksel taşma payı hariç) ve ALTINDA hiçbir
+    # overlay pikseli kalmamalı.
+    assert not (overlay[: y - 1] == neutral).all(axis=2).any()
+    assert not (overlay[y + h + 2 :] == neutral).all(axis=2).any()
+    # ...ama kutunun İÇİNDE hem kontur hem yazılar var.
+    assert (overlay[y : y + h] == neutral).all(axis=2).any()

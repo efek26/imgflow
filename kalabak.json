@@ -1,0 +1,71 @@
+{
+  "schema_version": 2,
+  "nodes": [
+    {
+      "id": "image_source",
+      "op_id": "io.image_source",
+      "params": {
+        "path": "C:/Users/Hp/.imgflow/captures/ed691dac47da4b3bbd4e6c6cf81cf5df.png"
+      },
+      "position": [
+        0.0,
+        0.0
+      ]
+    },
+    {
+      "id": "region",
+      "op_id": "roi.region",
+      "params": {
+        "enabled": true,
+        "shape": "RECT",
+        "x": 375,
+        "y": 136,
+        "w": 154,
+        "h": 58,
+        "cx": 100,
+        "cy": 100,
+        "r": 50
+      },
+      "position": [
+        0.0,
+        0.0
+      ]
+    },
+    {
+      "id": "sharpen",
+      "op_id": "filter.sharpen",
+      "params": {
+        "amount": 4.84,
+        "kernel_size": 12
+      },
+      "position": [
+        0.0,
+        0.0
+      ]
+    }
+  ],
+  "edges": [
+    {
+      "src": [
+        "image_source",
+        "image"
+      ],
+      "dst": [
+        "region",
+        "image"
+      ]
+    },
+    {
+      "src": [
+        "region",
+        "image"
+      ],
+      "dst": [
+        "sharpen",
+        "image"
+      ]
+    }
+  ],
+  "calibration_profile": null,
+  "calibration_height_mm": null
+}

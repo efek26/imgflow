@@ -983,3 +983,43 @@ def _draw_elongated_shape(image: np.ndarray, center: tuple[float, float], angle_
     rot = np.array([[c, -s], [s, c]])
     pts = (base @ rot.T) + np.array(center)
     cv2.fillPoly(image, [pts.astype(np.int32)], color=0)
+
+
+@pytest.mark.parametrize("ignore_polarity", [False, True])
+@pytest.mark.parametrize(
+    "y_lo, y_hi, x_lo, x_hi",
+    [
+        (40, 53, 45, 58),  # görüntünün ORTASINDA -- model ayak izi tamamen içeride
+        (0, 8, 0, 8),  # SOL ÜST köşe -- ayak izi görüntünün dışına taşar
+        (92, 100, 92, 100),  # SAĞ ALT köşe
+    ],
+)
+def test_score_window_is_numerically_identical_to_the_full_score_map(
+    ignore_polarity, y_lo, y_hi, x_lo, x_hi
+):
+    """`_refine_candidate` artık tam skor haritası (`cv2.filter2D`) yerine sadece okuduğu
+    ±xy_radius kutusunu hesaplıyor (`_score_window`). Bu, saf bir performans değişikliğidir --
+    aynı korelasyonun aynı sınır davranışıyla (BORDER_CONSTANT=0) seyrek hesaplanmış hâli
+    olmalı, sonuç DEĞİŞMEMELİ. Kenar durumları da kapsanıyor: pencere görüntü sınırındayken
+    model ayak izi dışarı taşar ve dışarıdaki katkılar 0 sayılmalıdır."""
+    rng = np.random.default_rng(7)
+    image = rng.integers(0, 256, (100, 100), dtype=np.uint8)
+    cv2.rectangle(image, (30, 30), (70, 70), 255, -1)
+    model = train_shape_model(image, RoiRect(25, 25, 50, 50), num_levels=1)
+    level = model.levels[0]
+
+    gray = image.astype(np.float32)
+    gx = cv2.Sobel(gray, cv2.CV_32F, 1, 0, ksize=3)
+    gy = cv2.Sobel(gray, cv2.CV_32F, 0, 1, ksize=3)
+    angles = np.arctan2(gy, gx)
+    cos_map, sin_map = np.cos(angles).astype(np.float32), np.sin(angles).astype(np.float32)
+
+    for angle, scale in ((0.0, 1.0), (23.0, 1.0), (-11.0, 1.3)):
+        full = shape_matching_module._score_map(
+            cos_map, sin_map, level, angle, scale, ignore_polarity
+        )
+        window = shape_matching_module._score_window(
+            cos_map, sin_map, level, angle, scale, ignore_polarity, y_lo, y_hi, x_lo, x_hi
+        )
+        assert window.shape == (y_hi - y_lo, x_hi - x_lo)
+        assert np.allclose(window, full[y_lo:y_hi, x_lo:x_hi], atol=1e-6)

@@ -55,6 +55,7 @@ import cv2
 import numpy as np
 
 from imgflow.core.auto_objects import detect_objects
+from imgflow.core.object_overlay import ObjectOverlayEntry, contour_from_mask, draw_labeled_objects
 from imgflow.core.params import ParamSpec, ParamType
 from imgflow.core.roi import parse_roi_list
 from imgflow.core.types import PortSpec, PortType
@@ -67,6 +68,14 @@ ayrıntılı açıklama."""
 _OK_COLOR = (0, 255, 0)
 _FAIL_COLOR = (0, 0, 255)
 _NEUTRAL_COLOR = (0, 255, 255)
+
+_DEFAULT_MIN_OBJECT_AREA = 100.0
+"""Otomatik Nesne Tespiti'nin varsayılan gürültü tabanı (px², ~10x10). `analysis.texture_
+props` AYNI değeri kullanır. Gerçek kullanıcı raporu: "otomatik nesne tespitinde min alan
+0 px'den başlıyor, başlangıç eşiğini artır" — 0'da tek piksellik eşikleme gürültüsü de ayrı
+bir 'nesne' olarak ölçülüp listeleniyordu. `segment.connected_components`'ın oran tabanlı
+(`min_area_ratio`) eşiğinin AKSİNE burada MUTLAK px² kullanılır: parametre baştan beri px²
+ve kayıtlı reçetelerdeki değerlerin anlamı değişmemeli."""
 
 
 def _to_lab(image: np.ndarray) -> np.ndarray:
@@ -112,32 +121,25 @@ def render_color_overlay(base_image: np.ndarray, measurement: dict[str, Any]) ->
     return overlay
 
 
-def render_color_overlay_multi(base_image: np.ndarray, measurements: list[dict[str, Any]]) -> np.ndarray:
-    """`region_props.py::draw_measurements_overlay` ile AYNI "numarala + kutuyu çiz" deseni,
-    ama boyut yerine L/a/b (+ tolerans açıksa ΔE/OK-NG) yazan Otomatik Nesne Tespiti modu
-    için basit (döndürülmemiş) sınırlayıcı kutu kullanır."""
-    overlay = np.ascontiguousarray(base_image).copy()
-    if overlay.ndim == 2:
-        overlay = cv2.cvtColor(overlay, cv2.COLOR_GRAY2BGR)
+def render_color_overlay_multi(
+    base_image: np.ndarray,
+    measurements: list[dict[str, Any]],
+    contours: list[np.ndarray | None] | None = None,
+) -> np.ndarray:
+    """Her nesneyi/ROI'yi numaralandırıp L/a/b (+ tolerans açıksa ΔE/OK-NG) değerleriyle
+    çizer -- ortak çizim mantığı için bkz. `core/object_overlay.py`.
 
-    scale_factor = max(overlay.shape[0], overlay.shape[1]) / _TEXT_SCALE_REFERENCE_DIM
-    box_thickness = max(2, round(2 * scale_factor))
-    font_scale = max(0.45, 0.5 * scale_factor)
-    thickness = max(1, round(1.5 * scale_factor))
-    line_height = max(16, round(18 * scale_factor))
-
-    for index, m in enumerate(measurements, start=1):
-        x, y, w, h = m["bbox_x"], m["bbox_y"], m["bbox_w"], m["bbox_h"]
+    `contours` verilirse (Otomatik Nesne Tespiti; `measurements` ile AYNI sırada, eleman
+    `None` olabilir) sınır, düz dikdörtgen yerine nesnenin GERÇEK dış hattı olarak çizilir --
+    gerçek kullanıcı isteği: "numaralandırdığımız kutuyu cismin hemen etrafına kontür gibi
+    çizebiliriz". Elle ROI Çiz modunda kontur yoktur (sınır kullanıcının çizdiği
+    dikdörtgendir)."""
+    entries: list[ObjectOverlayEntry] = []
+    for index, m in enumerate(measurements):
         if "tolerance_ok" in m:
             color = _OK_COLOR if m["tolerance_ok"] else _FAIL_COLOR
         else:
             color = _NEUTRAL_COLOR
-        cv2.rectangle(overlay, (x, y), (x + w, y + h), color, box_thickness)
-        tag = f"ROI{index}" if m.get("manual") else f"#{index}"
-        cv2.putText(
-            overlay, tag, (x, max(12, y - 5)),
-            cv2.FONT_HERSHEY_SIMPLEX, font_scale, color, thickness, cv2.LINE_AA,
-        )
         info = f"L={m['l_mean']:.0f} a={m['a_mean']:.0f} b={m['b_mean']:.0f}"
         if "delta_e" in m:
             status = "OK" if m.get("tolerance_ok") else "NG"
@@ -148,14 +150,15 @@ def render_color_overlay_multi(base_image: np.ndarray, measurements: list[dict[s
                 f"L:[{m['l_min']:.0f},{m['l_max']:.0f}] a:[{m['a_min']:.0f},{m['a_max']:.0f}] "
                 f"b:[{m['b_min']:.0f},{m['b_max']:.0f}]"
             )
-        ty = y + h + line_height
-        for line in lines:
-            cv2.putText(
-                overlay, line, (x, ty),
-                cv2.FONT_HERSHEY_SIMPLEX, font_scale, color, thickness, cv2.LINE_AA,
+        entries.append(
+            ObjectOverlayEntry(
+                measurement=m,
+                lines=lines,
+                color=color,
+                contour=contours[index] if contours is not None and index < len(contours) else None,
             )
-            ty += line_height
-    return overlay
+        )
+    return draw_labeled_objects(base_image, entries)
 
 
 @registry.register
@@ -185,13 +188,15 @@ class ColorPropsOp:
         ParamSpec(
             "min_object_area",
             ParamType.FLOAT,
-            default=0.0,
+            default=_DEFAULT_MIN_OBJECT_AREA,
             min=0.0,
             label="Min. Nesne Alanı (px²)",
             help="Sadece Otomatik Nesne Tespiti açıkken kullanılır: bu değerden KÜÇÜK "
             "alanlı nesneler (eşiklemeden kalan küçük gürültü/kırıntılar ya da parlama/"
-            "yansımadan kalan küçük parlak lekeler) yok sayılır. 0 = kapalı (varsayılan), "
-            "hiçbir nesne alanına göre elenmez.",
+            "yansımadan kalan küçük parlak lekeler) yok sayılır. Varsayılan 100 px² "
+            "(~10x10) — gerçek kullanıcı raporu: 0'dan başlayınca tek piksellik gürültü "
+            "lekeleri de 'nesne' sayılıp sonuç listesini dolduruyordu. Yüksek çözünürlüklü "
+            "kameralarda gürültü hâlâ geçiyorsa bu değeri yükseltin. 0 = kapalı.",
             advanced=True,
         ),
         ParamSpec(
@@ -378,7 +383,9 @@ class ColorPropsOp:
         if bool(params.get("per_object_enabled", False)):
             objects = detect_objects(
                 image,
-                min_area=float(params.get("min_object_area", 0.0)),
+                # Fallback, ParamSpec varsayılanıyla AYNI tutulur (arayüzden kurulan düğümlerde
+                # anahtar zaten dolu olur; bu değer sadece programatik/eski çağrılarda devreye girer).
+                min_area=float(params.get("min_object_area", _DEFAULT_MIN_OBJECT_AREA)),
                 max_area=float(params.get("max_object_area", 0.0)),
                 threshold_mode=str(params.get("threshold_mode", "otsu")),
                 threshold_value=int(params.get("threshold_value", 127)),
@@ -386,6 +393,7 @@ class ColorPropsOp:
                 close_kernel_size=int(params.get("close_kernel_size", 0)),
             )
             measurements: list[dict[str, Any]] = []
+            contours: list[np.ndarray | None] = []
             for obj in objects:
                 bgr_crop = image[obj.y : obj.y + obj.h, obj.x : obj.x + obj.w]
                 crop = _to_lab(bgr_crop)
@@ -395,7 +403,13 @@ class ColorPropsOp:
                 l_mean, a_mean, b_mean = (float(pixels[:, i].mean()) for i in range(3))
                 l_std, a_std, b_std = (float(pixels[:, i].std()) for i in range(3))
                 measurement = {
-                    "label": obj.label,
+                    # Gerçek kullanıcı raporu: "şekiller 1,2 diye numaralandırılıyor fakat
+                    # sonuçlarda 6,40 yazıyor." `DetectedObject.label` bağlı bileşen
+                    # analizinin HAM etiket numarasıdır (alan filtresinden geçen nesneler
+                    # kendi orijinal numaralarını korur, aralarında boşluk olur), oysa overlay
+                    # sıralı sayaçla (#1, #2...) numaralandırıyordu -- ikisi birbirini
+                    # tutmuyordu. Ölçüm de artık AYNI sıralı numarayı taşıyor.
+                    "label": len(measurements) + 1,
                     "l_mean": l_mean,
                     "a_mean": a_mean,
                     "b_mean": b_mean,
@@ -420,7 +434,8 @@ class ColorPropsOp:
                 }
                 _apply_tolerance(measurement)
                 measurements.append(measurement)
-            overlay = render_color_overlay_multi(image, measurements)
+                contours.append(contour_from_mask(obj.mask, obj.x, obj.y))
+            overlay = render_color_overlay_multi(image, measurements, contours)
             return {"measurements": measurements, "overlay": overlay}
 
         lab = _to_lab(image)

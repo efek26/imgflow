@@ -43,6 +43,7 @@ import cv2
 import numpy as np
 
 from imgflow.core.auto_objects import detect_objects
+from imgflow.core.object_overlay import ObjectOverlayEntry, contour_from_mask, draw_labeled_objects
 from imgflow.core.params import ParamSpec, ParamType
 from imgflow.core.roi import parse_roi_list
 from imgflow.core.types import PortSpec, PortType
@@ -50,6 +51,14 @@ from imgflow.operators import registry
 
 _TEXT_SCALE_REFERENCE_DIM = 1000.0
 """`region_props.py`/`color_props.py` ile AYNI ölçekleme deseni."""
+
+_MULTI_OBJECT_COLOR = (0, 255, 255)
+"""Nesne-başına overlay rengi -- `color_props.py`'nin tolerans KAPALI durumundaki
+`_NEUTRAL_COLOR`'ıyla aynı ton (doku analizinde tolerans kontrolü yok, tek renk yeterli)."""
+
+_DEFAULT_MIN_OBJECT_AREA = 100.0
+"""`color_props.py::_DEFAULT_MIN_OBJECT_AREA` ile AYNI değer/gerekçe (bkz. orası) --
+iki operatörün Otomatik Nesne Tespiti varsayılanları birbirinden sapmasın diye."""
 
 _ANGLE_OFFSETS = {
     "0": (0, 1),
@@ -147,34 +156,25 @@ def render_texture_overlay(base_image: np.ndarray, measurement: dict[str, Any]) 
     return overlay
 
 
-def render_texture_overlay_multi(base_image: np.ndarray, measurements: list[dict[str, Any]]) -> np.ndarray:
-    """`color_props.py::render_color_overlay_multi` ile AYNI "numarala + kutuyu çiz" deseni,
-    contrast/homogeneity/energy/correlation yazan Otomatik Nesne Tespiti modu için."""
-    overlay = np.ascontiguousarray(base_image).copy()
-    if overlay.ndim == 2:
-        overlay = cv2.cvtColor(overlay, cv2.COLOR_GRAY2BGR)
-
-    scale_factor = max(overlay.shape[0], overlay.shape[1]) / _TEXT_SCALE_REFERENCE_DIM
-    box_thickness = max(2, round(2 * scale_factor))
-    font_scale = max(0.45, 0.5 * scale_factor)
-    thickness = max(1, round(1.5 * scale_factor))
-    line_height = max(16, round(18 * scale_factor))
-    color = (0, 255, 255)
-
-    for index, m in enumerate(measurements, start=1):
-        x, y, w, h = m["bbox_x"], m["bbox_y"], m["bbox_w"], m["bbox_h"]
-        cv2.rectangle(overlay, (x, y), (x + w, y + h), color, box_thickness)
-        tag = f"ROI{index}" if m.get("manual") else f"#{index}"
-        cv2.putText(
-            overlay, tag, (x, max(12, y - 5)),
-            cv2.FONT_HERSHEY_SIMPLEX, font_scale, color, thickness, cv2.LINE_AA,
+def render_texture_overlay_multi(
+    base_image: np.ndarray,
+    measurements: list[dict[str, Any]],
+    contours: list[np.ndarray | None] | None = None,
+) -> np.ndarray:
+    """`color_props.py::render_color_overlay_multi` ile AYNI desen (ortak çizim mantığı için
+    bkz. `core/object_overlay.py`), contrast/homogeneity/energy yazan Otomatik Nesne Tespiti
+    modu için. `contours` verilirse sınır düz dikdörtgen yerine nesnenin GERÇEK dış hattı
+    olarak çizilir."""
+    entries = [
+        ObjectOverlayEntry(
+            measurement=m,
+            lines=[f"con={m['contrast']:.1f} hom={m['homogeneity']:.2f} nrj={m['energy']:.2f}"],
+            color=_MULTI_OBJECT_COLOR,
+            contour=contours[index] if contours is not None and index < len(contours) else None,
         )
-        info = f"con={m['contrast']:.1f} hom={m['homogeneity']:.2f} nrj={m['energy']:.2f}"
-        cv2.putText(
-            overlay, info, (x, y + h + line_height),
-            cv2.FONT_HERSHEY_SIMPLEX, font_scale, color, thickness, cv2.LINE_AA,
-        )
-    return overlay
+        for index, m in enumerate(measurements)
+    ]
+    return draw_labeled_objects(base_image, entries)
 
 
 @registry.register
@@ -204,7 +204,7 @@ class TexturePropsOp:
         ParamSpec(
             "min_object_area",
             ParamType.FLOAT,
-            default=0.0,
+            default=_DEFAULT_MIN_OBJECT_AREA,
             min=0.0,
             label="Min. Nesne Alanı (px²)",
             help="Sadece Otomatik Nesne Tespiti açıkken kullanılır: bu değerden KÜÇÜK "
@@ -362,7 +362,7 @@ class TexturePropsOp:
         if bool(params.get("per_object_enabled", False)):
             objects = detect_objects(
                 image,
-                min_area=float(params.get("min_object_area", 0.0)),
+                min_area=float(params.get("min_object_area", _DEFAULT_MIN_OBJECT_AREA)),
                 max_area=float(params.get("max_object_area", 0.0)),
                 threshold_mode=str(params.get("threshold_mode", "otsu")),
                 threshold_value=int(params.get("threshold_value", 127)),
@@ -370,16 +370,21 @@ class TexturePropsOp:
                 close_kernel_size=int(params.get("close_kernel_size", 0)),
             )
             measurements: list[dict[str, Any]] = []
+            contours: list[np.ndarray | None] = []
             for obj in objects:
                 crop = gray[obj.y : obj.y + obj.h, obj.x : obj.x + obj.w]
                 measurement = compute_texture_features(crop, distance, angle, levels)
-                measurement["label"] = obj.label
+                # `color_props.py` ile AYNI gerekçe: `DetectedObject.label` ham bağlı bileşen
+                # numarasıdır (aralarında boşluk olur), overlay ise sıralı sayaçla
+                # numaralandırıyordu -- sonuç listesiyle görüntü birbirini tutmuyordu.
+                measurement["label"] = len(measurements) + 1
                 measurement["bbox_x"] = obj.x
                 measurement["bbox_y"] = obj.y
                 measurement["bbox_w"] = obj.w
                 measurement["bbox_h"] = obj.h
                 measurements.append(measurement)
-            overlay = render_texture_overlay_multi(image, measurements)
+                contours.append(contour_from_mask(obj.mask, obj.x, obj.y))
+            overlay = render_texture_overlay_multi(image, measurements, contours)
             return {"measurements": measurements, "overlay": overlay}
 
         measurement = compute_texture_features(gray, distance, angle, levels)

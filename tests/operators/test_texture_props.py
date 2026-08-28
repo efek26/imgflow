@@ -202,3 +202,17 @@ def test_manual_roi_empty_list_yields_no_measurements():
     )
     assert out["measurements"] == []
     assert out["overlay"].shape == image.shape
+
+
+def test_per_object_labels_are_sequential_not_raw_component_ids():
+    """`color_props.py`'deki AYNI düzeltme (bkz. oradaki test): ölçüm satırının numarası
+    bağlı bileşen analizinin ham etiketi değil, overlay'in çizdiği sıralı numaradır."""
+    img = np.zeros((200, 200), dtype=np.uint8)
+    for x in range(10, 60, 8):
+        img[5:7, x : x + 2] = 200  # gürültü lekeleri (düşük ham etiket numaraları alır)
+    img[90:150, 30:90] = 180
+    img[90:150, 120:180] = 220
+
+    out = TexturePropsOp().run({"image": img}, {"per_object_enabled": True})
+
+    assert [m["label"] for m in out["measurements"]] == [1, 2]

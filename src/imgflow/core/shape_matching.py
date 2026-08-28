@@ -677,6 +677,90 @@ def _score_map(
     return np.abs(result) if ignore_polarity else result
 
 
+def _sparse_cache_for_level(
+    level: ShapeLevel,
+) -> dict[tuple[float, float], tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]]:
+    """`_kernel_cache_for_level` ile AYNI desendeki ikinci bir çalışma-zamanı önbelleği, ama
+    YOĞUN çekirdek yerine `_score_window`'un kullandığı SEYREK biçimi (ofsetler + ağırlıklar)
+    tutar."""
+    cache = getattr(level, "_sparse_kernel_cache", None)
+    if cache is None:
+        cache = {}
+        level._sparse_kernel_cache = cache
+    return cache
+
+
+def _sparse_kernel(
+    level: ShapeLevel, angle_offset_deg: float, scale: float
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    """`_build_direction_kernels`'in ürettiği yoğun çekirdeği `(ox, oy, w_cos, w_sin)` seyrek
+    biçimine çevirir: `dst(x,y) = Σ_i cos_map(y+oy_i, x+ox_i)*w_cos_i + sin_map(...)*w_sin_i`
+    -- `cv2.filter2D`'in (KORELASYON, konvolüsyon değil) anchor'lı davranışının BİREBİR aynısı.
+    Çekirdek hücresine düşen birden fazla model noktası zaten `np.add.at` ile toplandığından
+    seyrek biçim de aynı toplamı taşır; hem cos hem sin ağırlığı tam olarak 0 olan hücreler
+    (matematiksel katkısı 0) atlanır."""
+    cache = _sparse_cache_for_level(level)
+    key = (round(angle_offset_deg, 6), round(scale, 6))
+    cached = cache.get(key)
+    if cached is None:
+        if len(cache) >= _MAX_KERNEL_CACHE_ENTRIES:
+            cache.clear()
+        kernel_cos, kernel_sin, anchor = _build_direction_kernels(
+            level.points, level.angles, angle_offset_deg, scale
+        )
+        mask = (kernel_cos != 0) | (kernel_sin != 0)
+        rows, cols = np.nonzero(mask)
+        cached = (
+            (cols - anchor[0]).astype(np.intp),
+            (rows - anchor[1]).astype(np.intp),
+            kernel_cos[mask],
+            kernel_sin[mask],
+        )
+        cache[key] = cached
+    return cached
+
+
+def _score_window(
+    cos_map: np.ndarray,
+    sin_map: np.ndarray,
+    level: ShapeLevel,
+    angle_offset_deg: float,
+    scale: float,
+    ignore_polarity: bool,
+    y_lo: int,
+    y_hi: int,
+    x_lo: int,
+    x_hi: int,
+) -> np.ndarray:
+    """`_score_map` ile AYNI skoru, ama SADECE `[y_lo,y_hi) x [x_lo,x_hi)` penceresi için
+    hesaplar (sayısal olarak özdeş, ölçüldü: maks fark ~1e-18).
+
+    Neden: `_refine_candidate` bir adayı iyileştirirken skor haritasının yalnızca ±`xy_radius`
+    kutusunu okur, ama `cv2.filter2D` çıktı boyutunu girdi boyutuna EŞİTLER ve girdinin model
+    ayak izini de kapsaması ZORUNLUDUR -- yani tam çözünürlük seviyesinde ~280x280'lik bir
+    skor haritası hesaplanıp içinden 11x11'lik bir kutu okunuyordu. Seyrek/doğrudan hesap
+    sadece gereken konumları üretir (ölçüldü, 300 noktalı model: 4.11 ms -> 0.27 ms; ~15x).
+    Kaba arama (`_coarse_search`) TÜM görüntüyü taradığı için orada hâlâ `_score_map`/filter2D
+    kullanılır -- orada seyrek biçim daha yavaş olurdu."""
+    ox, oy, w_cos, w_sin = _sparse_kernel(level, angle_offset_deg, scale)
+    height, width = cos_map.shape
+    rows = np.arange(y_lo, y_hi, dtype=np.intp)[:, None, None] + oy[None, None, :]
+    cols = np.arange(x_lo, x_hi, dtype=np.intp)[None, :, None] + ox[None, None, :]
+
+    if rows.min() >= 0 and rows.max() < height and cols.min() >= 0 and cols.max() < width:
+        # Pencerenin model ayak iziyle birlikte TAMAMI görüntünün içinde (tipik durum) --
+        # kırpma/maskeleme adımları atlanır.
+        acc = cos_map[rows, cols] * w_cos + sin_map[rows, cols] * w_sin
+    else:
+        inside = (rows >= 0) & (rows < height) & (cols >= 0) & (cols < width)
+        clipped_rows = np.clip(rows, 0, height - 1)
+        clipped_cols = np.clip(cols, 0, width - 1)
+        acc = cos_map[clipped_rows, clipped_cols] * w_cos + sin_map[clipped_rows, clipped_cols] * w_sin
+        acc[~inside] = 0.0  # `cv2.BORDER_CONSTANT` (0) ile aynı sınır davranışı
+    result = acc.sum(axis=2) / float(level.points.shape[0])
+    return np.abs(result) if ignore_polarity else result
+
+
 def _local_maxima(score_map: np.ndarray, threshold: float, neighborhood: int = 3) -> list[list[float]]:
     dilated = cv2.dilate(score_map, np.ones((neighborhood, neighborhood), dtype=np.uint8))
     mask = (score_map >= threshold) & (score_map >= dilated - 1e-6)
@@ -829,16 +913,6 @@ def _coarse_search(
     return candidates
 
 
-def _model_extent(level: ShapeLevel) -> float:
-    """Model noktalarının merkeze göre en büyük Öklid uzaklığı — döndürme mesafeyi
-    korur, bu yüzden HERHANGİ bir açıda çekirdeğin kaplayacağı yarıçapın güvenli bir üst
-    sınırıdır (kırpılmış yamanın çekirdekten küçük kalıp kenar etkisiyle skoru bozmasını
-    önlemek için `_refine_candidate`'ın payını (pad) buna göre ayarlaması gerekir)."""
-    if level.points.size == 0:
-        return 0.0
-    return float(np.linalg.norm(level.points, axis=1).max())
-
-
 def _refine_candidate(
     cos_map: np.ndarray,
     sin_map: np.ndarray,
@@ -858,19 +932,26 @@ def _refine_candidate(
     """`scale_window <= 0` (ölçek araması kapalı, varsayılan) iken SADECE `scale0` denenir --
     eskisiyle BİREBİR aynı maliyet/davranış. Açıksa (bkz. `find_shape_model`'in `scale_min`/
     `scale_max`'ı) `angle_window`'un narrowlanma deseninin AYNISI ölçek için de uygulanır: her
-    piramit seviyesinde pencere `_REFINE_SCALE_DIVISOR`'a bölünerek daralır."""
-    h, w = cos_map.shape
-    max_scale = max(scale0 + scale_window, scale0, 1.0) if scale_window > 0 else max(scale0, 1.0)
-    pad = xy_radius + int(np.ceil(_model_extent(level) * max_scale)) + 2
-    y_lo, y_hi = max(0, int(y0 - pad)), min(h, int(y0 + pad) + 1)
-    x_lo, x_hi = max(0, int(x0 - pad)), min(w, int(x0 + pad) + 1)
-    best = [float(x0), float(y0), float(angle0), float(scale0), -1.0]
-    if y_hi <= y_lo or x_hi <= x_lo:
-        return best
+    piramit seviyesinde pencere `_REFINE_SCALE_DIVISOR`'a bölünerek daralır.
 
-    cos_patch = cos_map[y_lo:y_hi, x_lo:x_hi]
-    sin_patch = sin_map[y_lo:y_hi, x_lo:x_hi]
-    local_x0, local_y0 = x0 - x_lo, y0 - y_lo
+    Skor, eskiden model ayak izini de kapsayan BÜYÜK bir kırpım üzerinde `_score_map`
+    (`cv2.filter2D`) ile hesaplanıp içinden ±`xy_radius` kutusu okunuyordu; artık `_score_
+    window` doğrudan sadece o kutuyu üretiyor (sayısal olarak ÖZDEŞ, bkz. orada ki not)."""
+    h, w = cos_map.shape
+    best = [float(x0), float(y0), float(angle0), float(scale0), -1.0]
+
+    # Okunan konum kutusu (mutlak koordinat) -- eski kod bunu kırpımın içinde
+    # `int(local_0 ∓ xy_radius)` ile hesaplıyordu; kırpımın başlangıcı tam sayı olduğundan
+    # sonuç birebir aynıdır.
+    ry_lo, ry_hi = max(0, int(y0 - xy_radius)), min(h, int(y0 + xy_radius) + 1)
+    rx_lo, rx_hi = max(0, int(x0 - xy_radius)), min(w, int(x0 + xy_radius) + 1)
+    if ry_hi <= ry_lo or rx_hi <= rx_lo:
+        return best
+    # Subpiksel parabolü tepe noktasının KOMŞULARINI ister -- pencere her yönde 1 piksel
+    # geniş hesaplanır (eski büyük kırpımda bu doğal olarak sağlanıyordu); görüntü kenarında
+    # kırpılır, orada parabol zaten 0 döner (`_parabolic_peak_offset`).
+    wy_lo, wy_hi = max(0, ry_lo - 1), min(h, ry_hi + 1)
+    wx_lo, wx_hi = max(0, rx_lo - 1), min(w, rx_hi + 1)
 
     scale_values = (
         [scale0] if scale_window <= 0 else _frange(scale0 - scale_window, scale0 + scale_window, scale_step)
@@ -887,26 +968,23 @@ def _refine_candidate(
     while angle <= end_angle:
         angle_best = -1.0
         for scale in scale_values:
-            score_patch = _score_map(cos_patch, sin_patch, level, angle, scale, ignore_polarity)
-            ry_lo = max(0, int(local_y0 - xy_radius))
-            ry_hi = min(score_patch.shape[0], int(local_y0 + xy_radius) + 1)
-            rx_lo = max(0, int(local_x0 - xy_radius))
-            rx_hi = min(score_patch.shape[1], int(local_x0 + xy_radius) + 1)
-            if ry_hi > ry_lo and rx_hi > rx_lo:
-                sub = score_patch[ry_lo:ry_hi, rx_lo:rx_hi]
-                idx = np.unravel_index(int(np.argmax(sub)), sub.shape)
-                score = float(sub[idx])
-                angle_best = max(angle_best, score)
-                if score > best[4]:
-                    best = [
-                        float(x_lo + rx_lo + idx[1]),
-                        float(y_lo + ry_lo + idx[0]),
-                        float(angle),
-                        float(scale),
-                        score,
-                    ]
-                    best_patch = score_patch
-                    best_peak = (ry_lo + int(idx[0]), rx_lo + int(idx[1]))
+            window = _score_window(
+                cos_map, sin_map, level, angle, scale, ignore_polarity, wy_lo, wy_hi, wx_lo, wx_hi
+            )
+            sub = window[ry_lo - wy_lo : ry_hi - wy_lo, rx_lo - wx_lo : rx_hi - wx_lo]
+            idx = np.unravel_index(int(np.argmax(sub)), sub.shape)
+            score = float(sub[idx])
+            angle_best = max(angle_best, score)
+            if score > best[4]:
+                best = [
+                    float(rx_lo + idx[1]),
+                    float(ry_lo + idx[0]),
+                    float(angle),
+                    float(scale),
+                    score,
+                ]
+                best_patch = window
+                best_peak = (ry_lo - wy_lo + int(idx[0]), rx_lo - wx_lo + int(idx[1]))
         if angle_best >= 0.0:
             angle_scores.append((float(angle), angle_best))
         angle += angle_step

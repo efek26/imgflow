@@ -1928,6 +1928,112 @@ başlasın 0'dan değil; bazen de tüm şekli alıyor" dedi.** Üç ayrı gerçe
   (ikisi de belgelenmiş `Slot 'MainWindow::' not found` Qt olay-döngüsü kalıntısı, assert
   DEĞİL) — oturum başındaki baseline ile birebir aynı, regresyon yok.
 
+**Devam — kullanıcı "hsv ile bölge ölçümünde siyah beyaz yapıyor ve çok kasıyor; aynı şekilde
+hsv ayarlarıyla şekil bulmaya çalışınca da çok kasıyor" dedi.** Üç ayrı kök neden; hepsi
+ÖLÇÜLEREK (cProfile + sentetik 1920x1080/1280x1024 sahneler) bulundu, tahmin edilmedi.
+- **"Siyah beyaz yapıyor" — bug DEĞİL, mimari bir kısıt (`ui/main_window.py`):**
+  `analysis.region_props` overlay'ini ZORUNLU olarak `labels>0` ikili siluetine çizer, çünkü
+  tek-girdi zincirinde ona SADECE `labels` haritası ulaşır (kaynak görüntüye erişimi yok).
+  Bu yüzden renkli bir HSV maskesinden sonra Bölge Ölçümü seçilince önizleme siyah/beyaza
+  dönüyordu. Yeni `_measurement_overlay_base()` zincirde o adımdan ÖNCEKİ en yakın GERÇEK
+  (uint8) görüntüyü bulup (int32 `labels` haritası dtype ölçütüyle DOĞAL olarak atlanır)
+  `draw_measurements_overlay` ile ölçüm kutularını ONUN üzerine çizer; `_LABEL_MEASUREMENT_
+  OP_IDS` bu davranışın uygulandığı operatör kümesidir. Kaynak bulunamazsa (region_props
+  zincirin başındaysa) eski davranış aynen sürer. Operatörün KENDİ `overlay` çıktısı
+  DEĞİŞMEDİ (toplu işlem/CSV yolu etkilenmez) — değişen sadece önizlemede hangi tabanın
+  gösterildiği. Segmentasyonun kendisini görmek isteyen kullanıcı bir önceki adımı (Bağlı
+  Bileşenler) seçer; bu yüzden yeni bir parametre/görünüm modu EKLENMEDİ.
+- **Bölge ölçümü zinciri ~%30 hızlandı** (`_build_preview_frame`, 1920x1080, gürültülü HSV
+  maskesi: 52.8 -> 37.5 ms):
+  - `connected_components`: ikili-mi kontrolü `np.unique` (tüm kareyi SIRALIYOR, 6.6 ms) ->
+    `cv2.calcHist` 256 kova (0.2 ms). uint8 olmayan girdilerde eski yola düşülür.
+  - `connected_components`: elenen bileşenler artık sadece 0'a çekilmiyor, KALANLAR 1..K
+    olacak şekilde YENİDEN NUMARALANDIRILIYOR (tek LUT indekslemesi). Eskiden 73.000
+    bileşenden 6'sı kalsa bile en büyük etiket ~40.000 kalıyor, `region_props`'un
+    `for label in range(1, max_label+1)` döngüsü o kadar kez dönüyordu (24.7 -> 17.9 ms).
+  - `region_props._render_overlay`: `(labels>0).astype(uint8)*255` (üç tam-kare geçişi) ->
+    `cv2.compare(labels, 0, CMP_GT)` (2.9 -> 0.5 ms).
+  - `color.hsv`: gölge giderme KAPALIYKEN BGR->HSV->BGR gidiş-dönüşü tamamen atlanıyor
+    (girdi zaten doğru sonuç). Hem zaman kazandırır hem yuvarlama bozulmasını önler — o
+    bozulma düz bir arka planı komşu iki gri seviyeye dağıtıp `connected_components`'ın
+    gereksiz ek bileşen görmesine yol açıyordu.
+- **Şekil bulma ~%45 hızlandı (`core/shape_matching.py`), ve ÖNEMLİ: bu HSV'ye ÖZGÜ DEĞİLDİ.**
+  Ölçüm, HSV maskesinin şekil bulmayı yavaşlatMADIĞINI gösterdi (aynı sahnede ham 251 ms /
+  maskeli 230 ms) — asıl maliyet `_refine_candidate`'ti (toplamın ~2/3'ü). Kök neden:
+  `cv2.filter2D` çıktı boyutunu girdi boyutuna EŞİTLER ve girdi model ayak izini kapsamak
+  ZORUNDA, yani tam çözünürlükte ~280x280'lik bir skor haritası hesaplanıp içinden 11x11'lik
+  kutu okunuyordu. Yeni `_score_window()` (+ `_sparse_kernel`/`_sparse_cache_for_level`,
+  `_kernel_cache_for_level` ile AYNI desende) aynı korelasyonu SEYREK biçimde ve sadece
+  gereken konumlar için hesaplar. **Sayısal olarak ÖZDEŞ** (ölçüldü: maks fark ~1e-18;
+  benchmark'ta `best_score` tam basamağına kadar aynı kaldı) — `cv2.BORDER_CONSTANT`(0)
+  sınır davranışı dahil. Kaba arama (`_coarse_search`) TÜM görüntüyü taradığı için orada
+  hâlâ `_score_map`/filter2D kullanılır (orada seyrek biçim daha yavaş olurdu). Ölçüm:
+  seviye 0'da tek çağrı 4.11 -> 0.27 ms (~15x); uçtan uca 1280x1024/360°: 251 -> 140 ms,
+  eşleşme BULUNAMAYAN (skorların düşük kalıp aday budamasının çalışmadığı) sahnede 400 ->
+  148 ms. Artık kullanılmayan `_model_extent` kaldırıldı. Kaba arama eşikleri/sabitleri
+  (`_COARSE_ACCEPT_LOOSENING` vb.) KASITLI olarak DEĞİŞTİRİLMEDİ — "kaçırma" regresyonu
+  riski.
+- **Kullanıcıya not edilen davranışsal gerçek:** bir HSV MASKESİNDEN SONRA şekil aramak,
+  modelin eğitildiği iç kenarları silebilir (maske dışı her şey siyah olur) — skor düşer,
+  eşleşme bulunamaz VE arama yavaşlar (aday budaması devreye girmez). Model, aramanın
+  çalışacağı görüntüyle AYNI filtrelenmiş görüntü üzerinde eğitilmeli.
+- Testler: `_score_window` ile `_score_map`'in özdeşliği (görüntü ortası + iki köşe x
+  polarite = 6 durum), etiket yeniden numaralandırma, HSV gidiş-dönüşünün kaldırılması,
+  ve önizleme tabanının renkli kaldığı (düzeltme geri alınınca GERÇEKTEN `255>295` ile
+  başarısız olduğu doğrulandı). Tam paket 989 test; SABİT 1 failed + 1 error (ikisi de
+  belgelenmiş `Slot 'MainWindow::' not found` Qt olay-döngüsü kalıntısı, assert DEĞİL —
+  ilgili test tek başına koşunca GEÇİYOR), oturum başı baseline ile birebir aynı.
+
+**Devam — kullanıcı "circle roi aldıktan sonra hsv ayarı yaptım, ROI Bağlamda olacak şekilde;
+circle'ın etrafında bir kutu oluşturdu ve içini siyah yaptı" dedi.** Gerçek bir bug:
+`roi.region`'ın daire modu (`operators/builtin/roi.py::_run_circle`) çıktıyı dairenin KARE
+sınırlayıcı kutusuna kırpar ve kutu içinde dairenin DIŞINDA kalan pikselleri siyaha boyar
+(bu, HALCON'a benzeyen doğru/kasıtlı davranış). Ama `main_window::_paste_filtered_into_frame`
+("ROI Bağlamda" görünümü) bu kareyi OLDUĞU GİBİ ham karenin üzerine yapıştırıyordu: siyah
+köşeler ham görüntünün gerçek içeriğini SİLİYOR, üstüne bir de turuncu DİKDÖRTGEN çerçeve
+çiziliyordu -- kullanıcının gördüğü "kutu" ve "siyah iç" tam olarak bu ikisi. Yeni
+`_last_active_roi_is_circle()` (hedef adımdan önceki SON aktif `roi.region` adımının şekline
+bakar) ile daire durumunda sadece daire İÇİ yapıştırılıyor (`_run_circle`'daki `<= r**2` ile
+BİREBİR aynı ölçüt) ve sınır `cv2.circle` ile DAİRE olarak çiziliyor. `h == w` koşulu savunma
+amaçlı: daireden sonra zincirde başka bir kırpma varsa yama artık kare olmayacağından maske
+geometrisi dairenin kendisi olmaz ve eski (dikdörtgen) davranışa düşülür. Dikdörtgen ROI yolu
+DEĞİŞMEDİ. `tests/ui/test_main_window.py::test_in_context_view_pastes_only_the_circle_not_
+its_black_bounding_box` iki belirtiyi de (çerçeve pikseli + siyah köşe pikseli) sabitliyor,
+düzeltme geri alınınca GERÇEKTEN başarısız olduğu doğrulandı.
+
+**Devam — kullanıcı LAB analizi (Otomatik Nesne Tespiti) hakkında dört şey bildirdi:
+"şekiller 1,2 diye numaralandırılıyor fakat sonuçlarda 6,40 yazıyor", "min alan yine 0 px'den
+başlıyor, başlangıç eşiğini arttır", "şekli çizerken ROI'nin dışına çıkıyor, çıkmasın",
+"numaralandırdığımız kutuyu cismin hemen etrafına kontür gibi çizebiliriz".** Dördü de
+`analysis.color_props` VE `analysis.texture_props`'ta (ikisi aynı deseni paylaşıyor) düzeltildi:
+- **Numaralandırma tutarsızlığı (gerçek bug):** ölçüm satırındaki `"label"` alanı
+  `DetectedObject.label`, yani bağlı bileşen analizinin HAM etiket numarasıydı — alan
+  filtresinden geçen nesneler orijinal numaralarını korur, aralarında boşluk kalır (gürültü
+  lekeleri düşük numaraları alıp elendiğinde gerçek nesneler 6, 40... olur). Oysa overlay
+  `enumerate(..., start=1)` ile SIRALI numaralandırıyordu ve `measurements_summary.py` ham
+  `label`'ı yazıyordu. Artık ölçüm de `len(measurements) + 1` ile AYNI sıralı numarayı taşıyor.
+- **`min_object_area` varsayılanı 0.0 -> 100.0 px²** (yeni `_DEFAULT_MIN_OBJECT_AREA`, iki
+  operatörde de AYNI sabit). `segment.connected_components`'ın oran tabanlı `min_area_ratio`'
+  sunun AKSİNE burada MUTLAK px² korundu — parametre baştan beri px² ve kayıtlı reçetelerdeki
+  değerlerin anlamı değişmemeli. `max_object_area` 0 (kapalı) BIRAKILDI, kullanıcı onu istemedi.
+- **Yeni `core/object_overlay.py`** — iki operatörün `render_*_overlay_multi`'sindeki
+  tekrarlanan "numarala + kutu çiz + altına yaz" kodu tek yere alındı (`ObjectOverlayEntry` +
+  `draw_labeled_objects` + `contour_from_mask`). İki davranış değişti:
+  - **Sınır artık nesnenin GERÇEK dış hattı** (`contour_from_mask`, `obj.mask`'ten
+    `cv2.findContours` + tam görüntü koordinatına öteleme) — düz sınırlayıcı dikdörtgen değil.
+    Elle ROI Çiz modunda kontur YOKTUR (sınır kullanıcının çizdiği dikdörtgendir), orada
+    dikdörtgen çizilmeye devam eder; `contours` parametresi opsiyonel/`None` geçilebilir.
+  - **Yazılar kutunun İÇİNE** yerleştiriliyor (numara üstte, değerler altta) — eskiden numara
+    kutunun ÜSTÜNE (`y-5`), değerler ALTINA (`y+h+satır`) yazılıp ROI'nin dışına taşıyordu.
+    Nesne yazıları içine alamayacak kadar küçükse (içine yazmak nesneyi tamamen örterdi) eski
+    "altına yaz" davranışına düşülür ama görüntü sınırlarına KIRPILARAK. Yatayda da metin
+    genişliği `cv2.getTextSize` ile ölçülüp sağ kenardan taşacaksa sola kaydırılıyor (eskiden
+    sağdaki nesnelerin değerleri kırpılıyordu).
+- Testler: sıralı numaralandırma (her iki operatör), min alan varsayılanının gürültüyü elemesi,
+  konturun bbox köşesini boyaMAdığı, ve yazıların kutu dışına çıkmadığı (bu sonuncusunun eski
+  yerleşimle GERÇEKTEN başarısız olduğu doğrulandı). Tam paket 995 test; SABİT 1 failed +
+  1 error (belgelenmiş `Slot 'MainWindow::' not found` Qt kalıntısı), baseline ile aynı.
+
 Bilinen sonraki adım:
 - Serbest biçimli (poligon) ROI çizimi genel `roi.region` operatöründe (`core/roi.py`)
   HÂLÂ YOK — yukarıdaki `RoiCanvas` "POLYGON" modu SADECE `ShapeMatchingDialog`'un model

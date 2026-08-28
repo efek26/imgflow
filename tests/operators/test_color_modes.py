@@ -90,3 +90,27 @@ def test_hsv_apply_mask_keeps_color_instead_of_turning_binary():
     assert out["image"].shape == img.shape
     assert tuple(out["image"][0, 0]) == (0, 255, 0)  # aralık içi: orijinal renk korunur
     assert tuple(out["image"][3, 3]) == (0, 0, 0)  # aralık dışı: siyah
+
+
+def test_hsv_without_shadow_removal_returns_the_input_untouched():
+    """Gölge giderme kapalıyken operatör eskiden BGR->HSV->BGR gidip geliyordu: hem tam bir
+    kare dönüşümü kadar zaman harcıyor hem de yuvarlama nedeniyle görüntüyü hafifçe
+    BOZUYORDU (düz bir arka plan tek değer yerine komşu iki değere dağılıyor, aşağı akıştaki
+    `segment.connected_components` gereksiz ek bileşenler görüyordu)."""
+    rng = np.random.default_rng(0)
+    img = rng.integers(0, 256, (16, 16, 3), dtype=np.uint8)
+
+    out = HsvOp().run({"image": img}, {})
+
+    assert np.array_equal(out["image"], img)
+
+
+def test_hsv_shadow_removal_still_equalizes_the_value_channel():
+    """Gölge giderme AÇIKKEN HSV yolu (ve dolayısıyla geri dönüşüm) aynen korunur."""
+    img = np.zeros((8, 8, 3), dtype=np.uint8)
+    img[:, :4] = (30, 30, 30)
+    img[:, 4:] = (60, 60, 60)
+
+    out = HsvOp().run({"image": img}, {"shadow_removal": True})
+
+    assert not np.array_equal(out["image"], img)

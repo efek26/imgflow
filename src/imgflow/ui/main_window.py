@@ -84,6 +84,15 @@ _ROI_OP_ID = "roi.region"
 _MANUAL_ROI_OP_IDS = {"analysis.color_props", "analysis.texture_props"}
 """`manual_roi_enabled` parametresi olan operatörler -- seçiliyken ve bu parametre açıkken
 `image_view` çoklu-ROI çizim moduna geçer (bkz. `RoiCanvas.set_multi_mode`)."""
+_LABEL_MEASUREMENT_OP_IDS = {"analysis.region_props"}
+"""Çıktısı bir `labels` (etiket haritası) girdisinden türeyen ölçüm operatörleri -- kendi
+overlay'lerini zorunlu olarak İKİLİ (siyah/beyaz) bir siluet üzerine çizerler, çünkü
+`LinearPipeline`'ın tek-girdi zincirinde kaynak görüntüye erişimleri YOKTUR (bkz. CLAUDE.md).
+Gerçek kullanıcı raporu: "hsv ile bölge ölçümünde siyah beyaz yapıyor" -- renkli bir HSV
+maskesinin ardından Bölge Ölçümü seçilince önizleme birden siyah/beyaza dönüyordu. Bu adımlar
+seçiliyken önizleme tabanı `_measurement_overlay_base` ile zincirdeki en yakın GERÇEK
+(uint8) görüntüye taşınır; segmentasyonun kendisini görmek isteyen kullanıcı zaten bir önceki
+adımı (Bağlı Bileşenler) seçebilir."""
 _MM_PER_PX_OP_IDS = ("analysis.region_props", "geom.shape_match")
 """Kendi `mm_per_px` parametresi olan, otomatik kalibrasyon akışının (`_push_mm_per_px`/
 `_region_props_needs_mm_per_px`) doldurduğu operatörler."""
@@ -240,6 +249,35 @@ def _get_normal_base_image(
     return extract_preview_image(op_cls, result.outputs)
 
 
+def _measurement_overlay_base(
+    graph: Graph,
+    pipeline_order: list[str],
+    node_id: str,
+    engine: ExecutionEngine,
+    registry: Any,
+) -> np.ndarray | None:
+    """`node_id`'den ÖNCEKİ zincirde, gösterilebilir GERÇEK bir görüntü üreten en yakın adımın
+    çıktısını döner (yoksa `None`).
+
+    "Gerçek görüntü" ölçütü `dtype == uint8`: `segment.connected_components`'ın `labels`
+    çıktısı int32 bir etiket haritasıdır, bu ölçüt onu doğal olarak atlayıp bir üstteki
+    (ör. `color.hsv`'nin renkli maskeli) çıktısına iner. Adımlar bu noktada `engine`'de zaten
+    değerlendirilmiş/önbelleklenmiş olduğundan buradaki `evaluate` çağrıları cache-hit'tir."""
+    if node_id not in pipeline_order:
+        return None
+    for prev_id in reversed(pipeline_order[: pipeline_order.index(node_id)]):
+        node = graph.nodes.get(prev_id)
+        if node is None:
+            continue
+        result = engine.evaluate(prev_id)
+        if not result.ok:
+            return None
+        image = extract_preview_image(registry.get(node.op_id), result.outputs)
+        if image is not None and image.dtype == np.uint8:
+            return image
+    return None
+
+
 def _cumulative_roi_offset(graph: Graph, pipeline_order: list[str], target_node_id: str) -> tuple[int, int]:
     """`target_node_id`'den ÖNCEKİ (upstream) zincirde aktif bir/birden fazla `roi.region`
     varsa, toplam kırpma ofsetini (x,y) döner -- `_shift_measurements_for_roi_offset`
@@ -272,6 +310,24 @@ _ROI_CONTEXT_BORDER_COLOR = (0, 200, 255)
 """"ROI Bağlamda" görünümünde işlenmiş bölgenin sınırını gösteren çerçeve rengi (turuncu-sarı)
 -- ölçüm overlay'lerinin yeşil/kırmızısıyla karışmasın diye ayrı bir ton."""
 _ROI_CONTEXT_BORDER_PX = 2
+
+
+def _last_active_roi_is_circle(graph: Graph, pipeline_order: list[str], target_node_id: str) -> bool:
+    """Hedef adımdan ÖNCEKİ zincirdeki SON aktif `roi.region` adımı DAİRE modunda mı?
+
+    `roi.region`'ın daire modu (bkz. `operators/builtin/roi.py::_run_circle`) çıktıyı dairenin
+    KARE sınırlayıcı kutusuna kırpar ve kutu içinde dairenin DIŞINDA kalan pikselleri siyaha
+    boyar. "ROI Bağlamda" görünümü bu kareyi olduğu gibi ham karenin üzerine yapıştırdığında
+    o siyah köşeler gerçek görüntü içeriğini SİLİYORDU -- gerçek kullanıcı raporu: "circle roi
+    aldıktan sonra... circle'ın etrafında bir kutu oluşturdu ve içini siyah yaptı"."""
+    if target_node_id not in pipeline_order:
+        return False
+    for node_id in reversed(pipeline_order[: pipeline_order.index(target_node_id)]):
+        node = graph.nodes.get(node_id)
+        if node is None or node.op_id != _ROI_OP_ID or not node.params.get("enabled", False):
+            continue
+        return node.params.get("shape", "RECT") == "CIRCLE"
+    return False
 
 
 def _paste_filtered_into_frame(
@@ -310,7 +366,32 @@ def _paste_filtered_into_frame(
     y1, x1 = min(base.shape[0], y0 + h), min(base.shape[1], x0 + w)
     if y1 <= y0 or x1 <= x0:
         return None
-    base[y0:y1, x0:x1] = patch[: y1 - y0, : x1 - x0]
+    visible = patch[: y1 - y0, : x1 - x0]
+    if _last_active_roi_is_circle(graph, pipeline_order, node_id) and h == w:
+        # Daire ROI: kırpım dairenin KARE kutusudur, köşeleri `roi.region` tarafından zaten
+        # siyaha boyanmıştır (bkz. `_last_active_roi_is_circle`). Bu kareyi olduğu gibi
+        # yapıştırmak o siyah köşelerle ham karenin gerçek içeriğini SİLERDİ -- sadece daire
+        # İÇİ yapıştırılır, sınır da dikdörtgen yerine DAİRE olarak çizilir. `h == w` koşulu
+        # savunma amaçlı: daireden sonra zincirde başka bir kırpma varsa (kare olmayan yama)
+        # maskenin geometrisi artık dairenin kendisi olmadığından eski davranışa düşülür.
+        radius = h // 2
+        mask = np.zeros((h, w), dtype=bool)
+        yy, xx = np.ogrid[:h, :w]
+        # `roi.region::_run_circle` ile BİREBİR aynı ölçüt (orada "dışarısı" `> r**2`).
+        mask[(xx - radius) ** 2 + (yy - radius) ** 2 <= radius**2] = True
+        region = base[y0:y1, x0:x1]
+        visible_mask = mask[: y1 - y0, : x1 - x0]
+        region[visible_mask] = visible[visible_mask]
+        cv2.circle(
+            base,
+            (x0 + radius, y0 + radius),
+            radius,
+            _ROI_CONTEXT_BORDER_COLOR,
+            _ROI_CONTEXT_BORDER_PX,
+        )
+        return base
+
+    base[y0:y1, x0:x1] = visible
     cv2.rectangle(
         base, (x0, y0), (x1 - 1, y1 - 1), _ROI_CONTEXT_BORDER_COLOR, _ROI_CONTEXT_BORDER_PX
     )
@@ -554,6 +635,13 @@ def _build_preview_frame(
     else:
         measurements = (result.outputs or {}).get("measurements")
         mm_per_px = float(node.params.get("mm_per_px", 0.0))
+        if node.op_id in _LABEL_MEASUREMENT_OP_IDS:
+            # bkz. `_LABEL_MEASUREMENT_OP_IDS` -- ikili siluet yerine zincirdeki son gerçek
+            # (ör. HSV'nin RENKLİ) görüntü üzerine çizilir. Kaynak bulunamazsa operatörün
+            # kendi overlay'iyle (eski davranış) devam edilir.
+            base = _measurement_overlay_base(graph, pipeline_order, node_id, engine, registry)
+            if base is not None:
+                image = draw_measurements_overlay(base, measurements or [], mm_per_px)
         display_image, hover_measurements = _compose_display_image(
             image,
             measurements,

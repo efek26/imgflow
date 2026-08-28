@@ -1,0 +1,91 @@
+﻿===============================================================
+  EK - Görüntü İşleme ve Kalite Kontrol Uygulaması
+===============================================================
+
+KURULUM GEREKMEZ.
+Python, kütüphane ya da başka bir program yüklemenize gerek yok.
+Her şey flash bellekteki EK klasörünün içinde hazır geliyor.
+
+
+---------------------------------------------------------------
+1) UYGULAMAYI AÇMA
+---------------------------------------------------------------
+
+  EK klasörünü açın  ->  EK.exe dosyasına çift tıklayın.
+
+  ÖNEMLİ: İlk açılışta Windows mavi bir uyarı ekranı gösterebilir:
+  "Windows bilgisayarınızı korudu"
+
+  Bu bir virüs uyarısı DEĞİLDİR. Uygulamanın dijital imzası
+  (ücretli bir sertifika) olmadığı için çıkar. Geçmek için:
+
+      1. "Ek bilgi" yazısına tıklayın
+      2. Açılan "Yine de çalıştır" düğmesine basın
+
+  Bu uyarı yalnızca ilk açılışta çıkar.
+
+
+---------------------------------------------------------------
+2) DAHA HIZLI ÇALIŞTIRMA (tavsiye edilir)
+---------------------------------------------------------------
+
+  Flash bellekten açılış 10-20 saniye sürer.
+
+  EK klasörünün tamamını masaüstünüze sürükleyip kopyalarsanız
+  uygulama çok daha hızlı açılır. Kopyaladıktan sonra flash
+  belleğe artık ihtiyacınız kalmaz.
+
+
+---------------------------------------------------------------
+3) HAZIR AYARLAR
+---------------------------------------------------------------
+
+  KALİBRASYON ve KAMERA AYARLARI hazır gelir.
+  Bunlar için hiçbir şey yapmanıza gerek yok.
+
+  ŞEKİL MODELLERİ ve AYDINLATMA REFERANSLARI için tek bir komut
+  gerekir (bunlar Windows kullanıcı klasörüne kurulmak zorunda):
+
+      1. Flash belleği açın (EK-veri klasörünün göründüğü yer)
+      2. Boş bir alana SHIFT tuşuna basılı tutarak SAĞ TIKLAYIN
+      3. "PowerShell penceresini burada aç" seçeneğine tıklayın
+      4. Aşağıdaki satırı kopyalayıp yapıştırın ve Enter'a basın:
+
+  powershell -ExecutionPolicy Bypass -File veri_aktar.ps1 -Yukle {SURUCU}\EK-veri -ExeKlasoru {SURUCU}\EK
+
+     (Uygulamayı
+      masaüstüne kopyaladıysanız -ExeKlasoru olarak orayı yazın,
+      örnek:  -ExeKlasoru C:\Users\ahmet\Desktop\EK )
+
+
+---------------------------------------------------------------
+4) KAMERA KULLANIMI
+---------------------------------------------------------------
+
+  USB kamera        : doğrudan çalışır, ek kurulum gerekmez.
+                      Üstteki "Kamera Aç" düğmesinden seçin.
+
+  Basler / GigE     : uygulama hazır gelir, ancak bilgisayarda
+                      ayrıca Basler "pylon" sürücüsünün kurulu
+                      olması gerekir.
+
+  Kamera olmadan da çalışır: hazır bir fotoğrafı pencereye
+  sürükleyip bırakabilirsiniz.
+
+
+---------------------------------------------------------------
+5) SORUN ÇIKARSA
+---------------------------------------------------------------
+
+  Uygulama tüm hataları şu dosyaya yazar:
+
+      C:\Users\<kullanıcı adınız>\.imgflow\logs\imgflow.log
+
+  Bir sorun olursa bu dosyayı gönderin, içinde hatanın nedeni
+  yazılıdır.
+
+  Uygulama açılmıyorsa: EK klasörünün İÇİNDEKİ _internal
+  klasörünün silinmediğinden emin olun. EK.exe tek başına
+  çalışmaz, o klasörle birlikte taşınmalıdır.
+
+===============================================================

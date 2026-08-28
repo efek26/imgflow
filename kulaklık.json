@@ -1,0 +1,99 @@
+{
+  "schema_version": 2,
+  "nodes": [
+    {
+      "id": "image_source",
+      "op_id": "io.image_source",
+      "params": {
+        "path": "C:/Users/Hp/.imgflow/captures/9843114d9c6b4b22ae11a2ebe21e42bb.png"
+      },
+      "position": [
+        0.0,
+        0.0
+      ]
+    },
+    {
+      "id": "region",
+      "op_id": "roi.region",
+      "params": {
+        "cx": 370,
+        "cy": 269,
+        "enabled": true,
+        "h": 100,
+        "r": 69,
+        "shape": "CIRCLE",
+        "w": 100,
+        "x": 0,
+        "y": 0
+      },
+      "position": [
+        0.0,
+        0.0
+      ]
+    },
+    {
+      "id": "hsv",
+      "op_id": "color.hsv",
+      "params": {
+        "apply_mask": false,
+        "h_max": 179,
+        "h_min": 28,
+        "s_max": 255,
+        "s_min": 0,
+        "shadow_removal": false,
+        "v_max": 255,
+        "v_min": 0
+      },
+      "position": [
+        0.0,
+        0.0
+      ]
+    },
+    {
+      "id": "sharpen",
+      "op_id": "filter.sharpen",
+      "params": {
+        "amount": 1.0,
+        "kernel_size": 5
+      },
+      "position": [
+        0.0,
+        0.0
+      ]
+    }
+  ],
+  "edges": [
+    {
+      "src": [
+        "image_source",
+        "image"
+      ],
+      "dst": [
+        "region",
+        "image"
+      ]
+    },
+    {
+      "src": [
+        "region",
+        "image"
+      ],
+      "dst": [
+        "hsv",
+        "image"
+      ]
+    },
+    {
+      "src": [
+        "hsv",
+        "image"
+      ],
+      "dst": [
+        "sharpen",
+        "image"
+      ]
+    }
+  ],
+  "calibration_profile": null,
+  "calibration_height_mm": null
+}

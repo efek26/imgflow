@@ -215,3 +215,26 @@ def test_polarity_auto_labels_dark_products_instead_of_the_light_floor():
     assert auto["count"] == 2
     assert auto["labels"][5, 5] == 0
     assert auto["labels"][100, 70] != 0 and auto["labels"][100, 140] != 0
+
+
+def test_surviving_labels_are_renumbered_contiguously_after_filtering():
+    """Elenen bileşenler eskiden sadece 0'a çekiliyordu, yani etiket numaralarında BOŞLUKLAR
+    kalıyordu: gürültülü bir HSV maskesinde on binlerce bileşenden birkaçı kalsa bile en
+    büyük etiket numarası hâlâ on binlerce olabiliyordu ve `analysis.region_props`'un
+    `for label in range(1, max_label + 1)` döngüsü o kadar kez dönüyordu (ölçüldü:
+    1920x1080'de 24.7 ms -> 17.9 ms)."""
+    img = np.zeros((200, 200), dtype=np.uint8)
+    img[20:60, 20:60] = 255  # gerçek nesne
+    img[100:140, 100:140] = 255  # ikinci gerçek nesne
+    rng = np.random.default_rng(1)
+    for _ in range(400):  # eşiğin altında kalan tek piksellik gürültü
+        y, x = rng.integers(150, 195, size=2)
+        img[y, x] = 255
+
+    out = ConnectedComponentsOp().run({"image": img}, {"connectivity": "8"})
+
+    assert out["count"] == 2
+    labels = out["labels"]
+    assert int(labels.max()) == out["count"]  # 1..2, aralarında boşluk YOK
+    assert sorted(np.unique(labels).tolist()) == [0, 1, 2]
+    assert labels[40, 40] != labels[120, 120]  # iki nesne hâlâ AYRI etiketlerde
